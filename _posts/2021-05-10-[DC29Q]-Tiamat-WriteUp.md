@@ -12,6 +12,8 @@ category: write_up
 
 简单介绍一点本题所涉及的 qemu 相关知识，需要声明的是这一节不是对 qemu 的源码分析，仅仅包含 qemu-user 执行过程的一个概括，省略了大量 qemu 的细节，甚至很多地方为了方便理解本题表述并不准确。
 
+![qemu-user](https://github.com/RLee063/rlee063.github.io/blob/master/_images/tiamat/qemu-user.png)
+
 图中黄底为比较重要的函数，整体的执行流程大概是：从 main 函数出发，执行一些初始化操作之后进入 `cpu_loop` 函数，`cpu_loop` 函数循环调用 `cpu_exec` 。`cpu_exec` 也包含一个循环，负责一条一条（并不准确）反汇编 guest 程序的指令、生成能够在 host 主机执行的代码，并执行所生成的代码。当 `cpu_exec` 遇到中断时，会返回到 `cpu_loop` 交由 `cpu_loop` 进行处理。
 
 在 `cpu_exec` 函数内部更详细的调用过程如图所示，需要注意的有 3 个函数：
@@ -47,9 +49,9 @@ CPUArchState 类型就是 qemu 模拟的 target cpu 架构。[0] 处的代码是
 - /lic：flag 的 md5
 - /1.mz-f.mz：同样的内容 "STRANGE GAME\nTHE ONLY WINNING MOVE IS\nNOT TO PLAY.\n"
 
-其他文件大致的意思就是执行 `/qemooo /liccheck.bin` ，于是理所应当将 `liccheck.bin` 丢进 IDA，但是出了一点问题。
+其他文件大致的意思就是执行 `/qemooo /liccheck.bin` ，于是理所应当将 liccheck.bin 丢进 IDA，但是出了一点问题。
 
-![tiamat%206e62ed7dc88d467080b1b76f4b96dbb4/Untitled%201.png](tiamat%206e62ed7dc88d467080b1b76f4b96dbb4/Untitled%201.png)
+![ida-xd](https://github.com/RLee063/rlee063.github.io/blob/master/_images/tiamat/ida-xd.png)
 
 IDA 只能反汇编几条指令，结合 qemooo 这个文件名字可以猜到作者魔改了 qemu。好在 qemooo 是带符号的，这个时候可以在 Functions 窗口看到一些奇怪的单词：aarch64、riscv。难道说那些指令不是 mips 指令？有了上一节的扫盲，现在我们知道或许应该去 tb_gen_code() 里面看看 qemooo 是怎么反汇编这些指令的。
 
@@ -81,7 +83,7 @@ arch_index = (pc - base_pc) >> 2;
       }
 ```
 
-芜湖，我们好像发现了关键。不过这个看起来可不太妙，四种架构 X 大小端切换，让我想起了上个月做的我师傅 `yype` 的 `gatesXgame` 。简单通过交叉引用确定了 `tmap_arch` 数组没有在其他地方被修改之后，将数组 dump 下来开始写一个简单的反汇编程序。
+芜湖，我们好像发现了关键。不过这个看起来可不太妙，四种架构 X 大小端切换，让我想起了上个月做的我师傅 `yype` 的 gatesXgame 。简单通过交叉引用确定了 tmap_arch 数组没有在其他地方被修改之后，将数组 dump 下来开始写一个简单的反汇编程序。
 
 > 这里有个小地方可能需要注意下：capstone 得切换到 next 分支才能反汇编 riscv。
 > 
@@ -266,7 +268,7 @@ void get_random(){
 
 赋值发生在 'n' 操作对应的 get_random 里，open 作为 svc 系统调用，返回值存到了 r0 寄存器里，后续返回到 menu_loop 之前也没有对 r0 寄存器的再赋值，意味着我们可以在 'n' 操作后马上调用 'p' 操作进行泄露。所以我们第一个 payload 就是 `"e"+"1"*0x20+"vnp"` ！
 
-![tiamat%206e62ed7dc88d467080b1b76f4b96dbb4/Untitled%202.png](tiamat%206e62ed7dc88d467080b1b76f4b96dbb4/Untitled%202.png)
+![strange-leak](https://github.com/RLee063/rlee063.github.io/blob/master/_images/tiamat/strange-leak.png)
 
 ### BUG2: syscall number misuse
 
@@ -277,7 +279,7 @@ void get_random(){
 
 现在我们有两个可以让 fd 增加的函数，并且我们可以调用他们共计 0x20 次，加上 stdio 给我们贡献了 3 个文件描述符，足以让我们泄露所有的 license。是时候构建我们的第二个 payload： `"e"+"1"*32+"v"*7+"n"*0x16+"p"`
 
-![tiamat%206e62ed7dc88d467080b1b76f4b96dbb4/Untitled%203.png](tiamat%206e62ed7dc88d467080b1b76f4b96dbb4/Untitled%203.png)
+![leak-done](https://github.com/RLee063/rlee063.github.io/blob/master/_images/tiamat/leak-done.png)
 
 ## 5. 还原 license
 
@@ -323,13 +325,13 @@ joshua:
 
 所以，我们只需要很简单地在校验之前调用一次这个函数： `ed64be88c7427f0255c5002f81a9350fbjoshua\nv`
 
-![tiamat%206e62ed7dc88d467080b1b76f4b96dbb4/Untitled%204.png](tiamat%206e62ed7dc88d467080b1b76f4b96dbb4/Untitled%204.png)
+![final](https://github.com/RLee063/rlee063.github.io/blob/master/_images/tiamat/final.png)
 
 ## 参考
 
 [https://dttw.tech/posts/HJ9TU7J_O](https://dttw.tech/posts/HJ9TU7J_O)
 
-[https://github.com/o-o-overflow/dc2021q-tiamat-public](https://github.com/o-o-overflow/dc2021q-tiamat-public/tree/main/service/src/chal_builder)
+[https://github.com/o-o-overflow/dc2021q-tiamat-public](https://github.com/o-o-overflow/dc2021q-tiamat-public)
 
 [https://github.com/o-o-overflow/qemooo](https://github.com/o-o-overflow/qemooo)
 
