@@ -34,7 +34,6 @@ category: write_up
 
 举个例子对于 mips 指令 `sw $zero, 8($sp)` 其得到的 host 指令可能是这个样子的：
 
-
 ```c
 void __fastcall sub_7FD9F8000100()
 {
