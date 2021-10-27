@@ -23,9 +23,9 @@ entries:
         url: https://www.notion.so/k1r0akuee/67f2baca8b4a455683615a721b29fb11?v=ded96a266c154bb4b84b35a0926df2ef
   - title: notes
     entries:
-      - title: libc exploit techs
+      - title: libc exploitation
         url: https://www.notion.so/k1r0akuee/libc-all-in-one-5ff0b30463ec4bc0a0fb40541a691d96
-      - title: linux kernel privilege escalation
+      - title: linux kernel exploitation
         url: https://www.notion.so/k1r0akuee/kernel-all-in-one-f22ec5fa6ae84e8697614b9e19d9b82f
       - title: qemu escape
         url: https://www.notion.so/k1r0akuee/qemu-all-in-one-5f56afd593bc4d92b0b1c4d706d391e5
