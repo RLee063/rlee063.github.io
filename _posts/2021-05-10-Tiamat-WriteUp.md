@@ -1,7 +1,7 @@
 ---
 layout: post
 category: write_up
-title: [dc29q]reverse-tiamat writeup
+title: "[dc29q] tiamat writeup"
 ---
 
 [题目传送门](https://archive.ooo/c/tiamat/401/)
