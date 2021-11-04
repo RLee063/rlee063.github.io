@@ -95,12 +95,248 @@ bpf_framed_program {
 
 ### syz-extract internals
 
+| placeholder
+
+comp.extractConsts() 里用一个 for 循环遍历 parseGlobs() 解析出的 Node 数组，分别从 Define、Call、Struct、Int 等 Node 类型中提取出引用的常数名称。此外 syscall name 也会作为常数被放到 consts 数组中；且对于每个描述文件中 Include 和 Incdir 类型的 Node ，其指示了定义该描述文件涉及常量的文件和目录，所以其对应的路径也会被分别记录下来，帮助后面获得常量的具体数值；Define 宏定义类型的 Node 也会被记录。
+
+```
+func (comp *compiler) extractConsts() map[string]*ConstInfo {
+	infos := make(map[string]*constInfo)
+	for _, decl := range comp.desc.Nodes {
+		pos, _, _ := decl.Info()
+		info := getConstInfo(infos, pos)
+		switch n := decl.(type) {
+		case *ast.Include:
+			info.includeArray = append(info.includeArray, n.File.Value)
+		case *ast.Incdir:
+			info.incdirArray = append(info.incdirArray, n.Dir.Value)
+		case *ast.Define:
+			v := fmt.Sprint(n.Value.Value)
+			switch {
+			case n.Value.CExpr != "":
+				v = n.Value.CExpr
+			case n.Value.Ident != "":
+				v = n.Value.Ident
+			}
+			name := n.Name.Name
+			if _, builtin := comp.builtinConsts[name]; builtin {
+				comp.error(pos, "redefining builtin const %v", name)
+			}
+			info.defines[name] = v
+			comp.addConst(infos, pos, name)
+		case *ast.Call:
+			if comp.target.SyscallNumbers && !strings.HasPrefix(n.CallName, "syz_") {
+				comp.addConst(infos, pos, comp.target.SyscallPrefix+n.CallName)
+			}
+			for _, attr := range n.Attrs {
+				if callAttrs[attr.Ident].HasArg {
+					comp.addConst(infos, attr.Pos, attr.Args[0].Ident)
+				}
+			}
+		case *ast.Struct:
+			for _, attr := range n.Attrs {
+				if structOrUnionAttrs(n)[attr.Ident].HasArg {
+					comp.addConst(infos, attr.Pos, attr.Args[0].Ident)
+				}
+			}
+		}
+		switch decl.(type) {
+		case *ast.Call, *ast.Struct, *ast.Resource, *ast.TypeDef:
+			comp.extractTypeConsts(infos, decl)
+		}
+	}
+	comp.desc.Walk(ast.Recursive(func(n0 ast.Node) {
+		if n, ok := n0.(*ast.Int); ok {
+			comp.addConst(infos, n.Pos, n.Ident)
+		}
+	}))
+	return convertConstInfo(infos)
+}
+```
+
+prepareArch() 在 extractConsts() 基本就结束返回到 worker() 函数继续执行，遍历参数中给出的描述文件名称，按 filename 从 infos 数组中提取对应的 info，把处理好的 file job 放入 jobC，下一个消费者线程获得该 job 后就会调用 processFile() 对其进行处理。
+
+processFile() 内部通过 extractor.processFile() 调用到具体操作系统的接口实现。在 linux 中，常量的数值是借助 gcc 编译器来确定的。
+
+processFile() 首先根据上一步提取的 Incdirs 构建编译选项，然后进入到 extract() -> compile() 执行。compile() 中首先调用 srcTemplate.Execute() ，根据提供的常量标识符、Define 宏定义和 include 文件，通过模板生成确定常量的 C 语言代码，再使用 gcc 编译生成二进制文件，最后返回到 extract() 执行二进制文件获得所有常量标识符对应的数值。
+
+```
+func (*linux) processFile(arch *Arch, info *compiler.ConstInfo) (map[string]uint64, map[string]bool, error) {
+	if strings.HasSuffix(info.File, "_kvm.txt") &&
+		(arch.target.Arch == targets.ARM || arch.target.Arch == targets.RiscV64) {
+		// Hack: KVM is not supported on ARM anymore. We may want some more official support
+		// for marking descriptions arch-specific, but so far this combination is the only
+		// one. For riscv64, KVM is not supported yet but might be in the future.
+		// Note: syz-sysgen also ignores this file for arm and riscv64.
+		return nil, nil, nil
+	}
+	headerArch := arch.target.KernelHeaderArch
+	sourceDir := arch.sourceDir
+	buildDir := arch.buildDir
+	args := []string{
+		// This makes the build completely hermetic, only kernel headers are used.
+		"-nostdinc",
+		"-w", "-fmessage-length=0",
+		"-O3", // required to get expected values for some __builtin_constant_p
+		"-I.",
+		"-D__KERNEL__",
+		"-DKBUILD_MODNAME=\"-\"",
+		"-I" + sourceDir + "/arch/" + headerArch + "/include",
+		"-I" + buildDir + "/arch/" + headerArch + "/include/generated/uapi",
+		"-I" + buildDir + "/arch/" + headerArch + "/include/generated",
+		"-I" + sourceDir + "/arch/" + headerArch + "/include/asm/mach-malta",
+		"-I" + sourceDir + "/arch/" + headerArch + "/include/asm/mach-generic",
+		"-I" + buildDir + "/include",
+		"-I" + sourceDir + "/include",
+		"-I" + sourceDir + "/arch/" + headerArch + "/include/uapi",
+		"-I" + buildDir + "/arch/" + headerArch + "/include/generated/uapi",
+		"-I" + sourceDir + "/include/uapi",
+		"-I" + buildDir + "/include/generated/uapi",
+		"-I" + sourceDir,
+		"-I" + sourceDir + "/include/linux",
+		"-I" + buildDir + "/syzkaller",
+		"-include", sourceDir + "/include/linux/kconfig.h",
+	}
+	args = append(args, arch.target.CFlags...)
+	for _, incdir := range info.Incdirs {
+		args = append(args, "-I"+sourceDir+"/"+incdir)
+	}
+	if arch.includeDirs != "" {
+		for _, dir := range strings.Split(arch.includeDirs, ",") {
+			args = append(args, "-I"+dir)
+		}
+	}
+	params := &extractParams{
+		AddSource:      "#include <asm/unistd.h>",
+		ExtractFromELF: true,
+		TargetEndian:   arch.target.HostEndian,
+	}
+	cc := arch.target.CCompiler
+	res, undeclared, err := extract(info, cc, args, params)
+	if err != nil {
+		return nil, nil, err
+	}
+	if arch.target.PtrSize == 4 {
+		// mmap syscall on i386/arm is translated to old_mmap and has different signature.
+		// As a workaround fix it up to mmap2, which has signature that we expect.
+		// pkg/csource has the same hack.
+		const mmap = "__NR_mmap"
+		const mmap2 = "__NR_mmap2"
+		if res[mmap] != 0 || undeclared[mmap] {
+			if res[mmap2] == 0 {
+				return nil, nil, fmt.Errorf("%v is missing", mmap2)
+			}
+			res[mmap] = res[mmap2]
+			delete(undeclared, mmap)
+		}
+	}
+	return res, undeclared, nil
+}
+
+func compile(cc string, args []string, data *CompileData) (string, []byte, error) {
+	src := new(bytes.Buffer)
+	if err := srcTemplate.Execute(src, data); err != nil {
+		return "", nil, fmt.Errorf("failed to generate source: %v", err)
+	}
+	binFile, err := osutil.TempFile("syz-extract-bin")
+	if err != nil {
+		return "", nil, err
+	}
+	args = append(args, []string{
+		"-x", "c", "-",
+		"-o", binFile,
+		"-w",
+	}...)
+	if data.ExtractFromELF {
+		args = append(args, "-c")
+	}
+	cmd := osutil.Command(cc, args...)
+	cmd.Stdin = src
+	if out, err := cmd.CombinedOutput(); err != nil {
+		os.Remove(binFile)
+		return "", out, err
+	}
+	return binFile, nil, nil
+}
+```
+
+srcTemplate.Execute() 模板样例如下（考虑未定义 ExtractFromELF），根据上一步解析的 Includes 数组引入对应的头文件，再根据 Defines 数组写上所有的宏定义。在 main() 函数中，把所有需要确定数值的变量标识符写入 vals 数组，再用一个 for 循环输出所有数值，在编译期间 gcc 会从头文件中查找出所有的常量的数值并进行替换，运行编译所得到的程序即可得到所有常量对应的数值。
+
+```
+#ifndef __GLIBC_USE
+#	define __GLIBC_USE(X) 0
+#endif
+
+#include <uapi/linux/bpf.h>
+#include <uapi/linux/btf.h>
+
+{{range $name, $val := $.Defines}}
+#ifndef {{$name}}
+#	define {{$name}} {{$val}}
+#endif
+{{end}}
+
+#ifndef BPF_ABS0
+#	define BPF_ABS0 BPF_ABS >> 5
+#endif
+
+#ifndef BPF_ADD0
+#	define BPF_ADD0 BPF_ADD >> 4
+#endif
+
+#ifndef BPF_AND0
+#	define BPF_AND0 BPF_AND >> 4
+#endif
+
+...
+
+#ifndef BPF_ARSH0
+#	define BPF_ARSH0 BPF_ARSH >> 4
+#endif
+
+int main() {
+	int i;
+	unsigned long long vals[] = {
+            (unsigned long long)BPF_ABS0,
+            (unsigned long long)BPF_ADD0,
+            (unsigned long long)BPF_ALU,
+            (unsigned long long)BPF_ALU64,
+            (unsigned long long)BPF_AND0,
+            ...
+	};
+	for (i = 0; i < sizeof(vals)/sizeof(vals[0]); i++) {
+		if (i != 0)
+			printf(" ");
+		printf("%llu", vals[i]);
+	}
+	return 0;
+}
+
+```
+
+worker() 运行结束后返回到 main() 函数，将结果写入 .txt.const 文件，样例如下，主要也就是常量和 syscall 系统调用号。
+
+```
+# Code generated by syz-sysgen. DO NOT EDIT.
+arches = 386, amd64, arm, arm64, mips64le, ppc64le, riscv64, s390x
+BPF_ABS0 = 1
+BPF_ADD0 = 0
+BPF_ALU = 4
+BPF_ALU64 = 7
+...
+__NR_bpf = 280
+```
+
 ### syz-sysgen internals
 
+| 突然觉得这个系列写得有点无聊，等有想法再回来继续吧。
+
 ## Grammar in fuzzing
+
+| todo
 
 ### analyze
 ### Generate
 ### Mutate
 ### minimize
-### validate, 
+### validate
