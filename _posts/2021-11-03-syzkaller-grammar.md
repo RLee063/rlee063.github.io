@@ -12,7 +12,7 @@ title: "syzkaller internals: grammar system"
 
 ## TOC
 - [Syntax](#syntax)
-- [Compilation](#Compilation)
+- [Compilation](#compilation)
 - [Grammar in fuzzing](#grammar-in-fuzzing)
 
 ## Syntax
@@ -32,27 +32,27 @@ bpf$PROG_LOAD(cmd const[BPF_PROG_LOAD], arg ptr[in, bpf_prog], size len[arg]) fd
 
 ```
 type bpf_prog_t[TYPE, ATTACH_TYPE, BTF_ID, PROG_FD] {
-	type			TYPE
-	ninsn			bytesize8[insns, int32]
-	insns			ptr64[in, bpf_instructions]
-	license			ptr64[in, string[bpf_licenses]]
-	loglev			int32
-	logsize			len[log, int32]
-	log			ptr64[out, array[int8], opt]
-	kern_version		flags[bpf_kern_version, int32]
-	flags			flags[bpf_prog_load_flags, int32]
-	prog_name		array[const[0, int8], BPF_OBJ_NAME_LEN]
-	prog_ifindex		ifindex[opt]
-	expected_attach_type	ATTACH_TYPE
-	btf_fd			fd_btf[opt]
-	func_info_rec_size	const[BPF_FUNC_INFO_SIZE, int32]
-	func_info		ptr64[in, bpf_func_info]
-	func_info_cnt		len[func_info, int32]
-	line_info_rec_size	const[BPF_LINE_INFO_SIZE, int32]
-	line_info		ptr64[in, bpf_line_info]
-	line_info_cnt		len[line_info, int32]
-	attach_btf_id		BTF_ID
-	attach_prog_fd		PROG_FD
+    type            TYPE
+    ninsn            bytesize8[insns, int32]
+    insns            ptr64[in, bpf_instructions]
+    license            ptr64[in, string[bpf_licenses]]
+    loglev            int32
+    logsize            len[log, int32]
+    log            ptr64[out, array[int8], opt]
+    kern_version        flags[bpf_kern_version, int32]
+    flags            flags[bpf_prog_load_flags, int32]
+    prog_name        array[const[0, int8], BPF_OBJ_NAME_LEN]
+    prog_ifindex        ifindex[opt]
+    expected_attach_type    ATTACH_TYPE
+    btf_fd            fd_btf[opt]
+    func_info_rec_size    const[BPF_FUNC_INFO_SIZE, int32]
+    func_info        ptr64[in, bpf_func_info]
+    func_info_cnt        len[func_info, int32]
+    line_info_rec_size    const[BPF_LINE_INFO_SIZE, int32]
+    line_info        ptr64[in, bpf_line_info]
+    line_info_cnt        len[line_info, int32]
+    attach_btf_id        BTF_ID
+    attach_prog_fd        PROG_FD
 }
 
 type bpf_prog bpf_prog_t[flags[bpf_prog_type, int32], flags[bpf_attach_type, int32], bpf_btf_id[opt], fd_bpf_prog[opt]]
@@ -62,28 +62,28 @@ type bpf_prog bpf_prog_t[flags[bpf_prog_type, int32], flags[bpf_attach_type, int
 
 ```
 bpf_instructions [
-	raw	array[bpf_insn]
-	framed	bpf_framed_program
+    raw    array[bpf_insn]
+    framed    bpf_framed_program
 ] [varlen]
 
 bpf_insn [
-	generic	bpf_insn_generic
-	ldst	bpf_insn_ldst
-	alu	bpf_insn_alu
-	jmp	bpf_insn_jmp
-	call	bpf_insn_call_helper
-	func	bpf_insn_call_func
-	exit	bpf_insn_exit
-	initr0	bpf_insn_init_r0
-	map	bpf_insn_map
-	map_val	bpf_insn_map_value
-	btf_id	bpf_insn_btf_id
+    generic    bpf_insn_generic
+    ldst    bpf_insn_ldst
+    alu    bpf_insn_alu
+    jmp    bpf_insn_jmp
+    call    bpf_insn_call_helper
+    func    bpf_insn_call_func
+    exit    bpf_insn_exit
+    initr0    bpf_insn_init_r0
+    map    bpf_insn_map
+    map_val    bpf_insn_map_value
+    btf_id    bpf_insn_btf_id
 ] [varlen]
 
 bpf_framed_program {
-	initr0	bpf_insn_init_r0
-	body	array[bpf_insn]
-	exit	bpf_insn_exit
+    initr0    bpf_insn_init_r0
+    body    array[bpf_insn]
+    exit    bpf_insn_exit
 } [packed]
 ```
 
@@ -95,6 +95,128 @@ bpf_framed_program {
 
 ### syz-extract internals
 
+使用 syz-extract 的一般方式如下
+
+```
+make bin/syz-extract
+bin/syz-extract -os $OS -arch $ARCH -sourcedir $KSRC -builddir $LINUXBLD <new>.txt
+```
+
+进入 main 函数后首先会调用 flag.Parse() 解析参数，根据指定的 subsystem 和 arch 找到对应的配置，定位到包含所有该架构下系统调用描述文件的目录。做了一些准备和检查的工作后，会启用多个线程分别对指定的所有架构进行处理。
+
+```
+func main(){
+    ...
+    jobC := make(chan interface{}, len(archArray)*len(files))
+    for _, arch := range arches {
+        jobC <- arch
+    }
+
+    for p := 0; p < runtime.GOMAXPROCS(0); p++ {
+        go worker(extractor, jobC)
+    }
+    ...
+}
+```
+
+提取常量的步骤分为两步：
+1. 对于每一个指定的架构，会首先调用 processArch() 提取出所有的常量；
+2. 对于每一个指定的描述文件，会调用 processFile() 来确定常量的具体数值。
+
+这里采用了生产者消费者的工作模式，除了 main() 函数中会往 jobC 里加入 arch 作为 job 之外，在每个 arch 处理结束后会把 file 加入 jobC 中。
+
+```
+func worker(extractor Extractor, jobC chan interface{}) {
+    for job := range jobC {
+        switch j := job.(type) {
+        case *Arch:
+            infos, err := processArch(extractor, j)
+            j.err = err
+            close(j.done)
+            if j.err == nil {
+                for _, f := range j.files {
+                    f.info = infos[filepath.Join("sys", j.target.OS, f.name)]
+                    jobC <- f
+                }
+            }
+        case *File:
+            j.consts, j.undeclared, j.err = processFile(extractor, j.arch, j)
+            close(j.done)
+        }
+    }
+}
+```
+
+processArch() 的过程主要包含三个步骤：
+1. ParseGlob() 解析 .txt 文件。
+2. ExtractConsts() 提取出所有的常量。
+3. prepareArch()
+
+```
+func processArch(extractor Extractor, arch *Arch) (map[string]*compiler.ConstInfo, error) {
+	errBuf := new(bytes.Buffer)
+	eh := func(pos ast.Pos, msg string) {
+		fmt.Fprintf(errBuf, "%v: %v\n", pos, msg)
+	}
+	top := ast.ParseGlob(filepath.Join("sys", arch.target.OS, "*.txt"), eh)
+	if top == nil {
+		return nil, fmt.Errorf("%v", errBuf.String())
+	}
+	infos := compiler.ExtractConsts(top, arch.target, eh)
+	if infos == nil {
+		return nil, fmt.Errorf("%v", errBuf.String())
+	}
+	if err := extractor.prepareArch(arch); err != nil {
+		return nil, err
+	}
+	return infos, nil
+}
+```
+
+ParseGlob() 基本上是按原样把描述文件 .txt 中的规则解析为了一种 in-memory 的表示 Node 到一个数组中存储。主要流程会通过 ParseGlob()->Parse()->p.parseTopRecover()->p.parseTop() 处理。这一步主要是确定规则语句所对应语法的内置类型，parseTop() 根据扫描到的不同类型的 token，按照对应的方式解析生成对应类型的实例 Node。这一步还没有展开 syscall 中的参数，没有递归生成 AST。例如 bpf$PROG_LOAD 的第二个参数 arg ptr[in, bpf_prog]，解析结果只说明了是一个名为 arg，类型为有两个参数 [in, bpf_prog] 的 ptr 类型。
+
+```
+func (p *parser) parseTop() Node {
+	switch p.tok {
+	case tokNewLine:
+		return &NewLine{Pos: p.pos}
+	case tokComment:
+		return p.parseComment()
+	case tokDefine:
+		return p.parseDefine()
+	case tokInclude:
+		return p.parseInclude()
+	case tokIncdir:
+		return p.parseIncdir()
+	case tokResource:
+		return p.parseResource()
+	case tokIdent:
+		name := p.parseIdent()
+		if name.Name == "type" {
+			return p.parseTypeDef()
+		}
+		switch p.tok {
+		case tokLParen:
+			return p.parseCall(name)
+		case tokLBrace, tokLBrack:
+			return p.parseStruct(name)
+		case tokEq:
+			return p.parseFlags(name)
+		default:
+			p.expect(tokLParen, tokLBrace, tokLBrack, tokEq)
+		}
+	case tokIllegal:
+		// Scanner has already producer an error for this one.
+		panic(errSkipLine)
+	default:
+		p.expect(tokComment, tokDefine, tokInclude, tokResource, tokIdent)
+	}
+	panic("not reachable")
+}
+
+```
+
+ExtractConsts() 以第二个参数为 nil 调用 Compile() （这里注意一下，syz-sysgen() 核心也是调用到 Compile()，只不过第二个参数 consts 会传入 syz-extract 生成的结果。这里第二个参数不同，几乎是两条不同的路径）。对于 consts 传入 nil 的情况，Compile() 只是调用 comp.extracConsts() 来完成具体的提取常量的过程。
 ### syz-sysgen internals
 
 ## Grammar in fuzzing
@@ -104,3 +226,6 @@ bpf_framed_program {
 ### Mutate
 ### minimize
 ### validate, 
+
+## References
+- [https://xz.aliyun.com/t/5098](https://xz.aliyun.com/t/5098)
