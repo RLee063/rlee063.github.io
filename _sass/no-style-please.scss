@@ -1,30 +1,30 @@
 // -------------- THEME SWITCHER -------------- //
-@mixin dark-appearance {
-  filter: invert(1);
-  img {
-    filter: invert(1);
+// @mixin dark-appearance {
+//   filter: invert(1);
+//   img {
+//     filter: invert(1);
 
-    &.ioda { filter: invert(0); }
-  }
-}
+//     &.ioda { filter: invert(0); }
+//   }
+// }
 
-body[a="dark"] { @include dark-appearance; }
+// body[a="dark"] { @include dark-appearance; }
 
 
-@media (prefers-color-scheme: dark) {
-  body[a="auto"] { @include dark-appearance; }
-}
+// @media (prefers-color-scheme: dark) {
+//   body[a="auto"] { @include dark-appearance; }
+// }
 // -------------------------------------------- //
 
 // bg color is also needed in html in order to
 // block body's background propagation
 // see: https://stackoverflow.com/a/61265706
-html, body { background: white; }
+html, body { background: rgb(0, 0, 0); }
 
 html { height: 100%; }
 
 body {
-  color: black;
+  color: rgb(255, 255, 255);
   font-family: monospace;
   font-size: 15px;
   line-height: 1.4;
@@ -44,7 +44,9 @@ p { margin: 1rem 0; }
 
 li { margin: 0.4rem 0; }
 
-*:target { background: yellow; }
+*:target { 
+  background: rgb(255, 0, 0); 
+}
 
 .w {
   max-width: 720px;
@@ -63,28 +65,31 @@ hr {
 table { width: 100%; }
 
 table, th, td {
-  border: thin solid black;
+  border: thin solid rgb(255, 255, 255);
   border-collapse: collapse;
   padding: 0.4rem;
 }
 
 code {
-  color: black;
-  background: white;
+  color: rgb(255, 255, 255);
 }
 
 div.highlighter-rouge code {
   display: block;
   overflow-x: auto;
   white-space: pre;
-  padding: 1rem;
+  // padding: 1rem;
+  padding-top: 0.5rem;
+  padding-bottom: 0.5rem;
   font-size: 13px;
-  border: thin solid black;
+  border-top: 0.05rem solid rgb(255, 255, 255);
+  border-bottom: 0.05rem solid rgb(255, 255, 255);;
+  // border: 0.01ch solid rgb(255, 255, 255);
 }
 
 blockquote {
   font-style: italic;
-  border: thin solid black;
+  // border: thin solid rgb(255, 255, 255);
   padding: 1rem;
 
   p { margin: 0; }
@@ -93,5 +98,15 @@ blockquote {
 img {
   max-width: 100%;
   display: block;
-  margin: 0 auto;
+  margin: auto;
+  // border: thin solid rgb(255, 255, 255);
 }
+
+a:link { 
+  color: #00FF00; 
+  text-decoration:underline; 
+} 
+a:visited { 
+  color:#FF0000; 
+  text-decoration:none; 
+} 
