@@ -5,9 +5,11 @@ title: "syzkaller internals: architecture"
 ---
 ## TOC
 - [Overview](#overview)
-- [syz-manager <-> VM](#syz-manager---vm)
-- [syz-manager <-> syz-fuzzer](#syz-manager---syz-fuzzer)
-- [syz-fuzzer <-> syz-executor](#syz-fuzzer---syz-executor)
+- [syz-manager <---> VM](#syz-manager--vm)
+- [syz-manager ---> syz-fuzzer](#syz-manager--syz-fuzzer)
+- [syz-manager <--- syz-fuzzer](#syz-manager--syz-fuzzer-1)
+- [syz-fuzzer <---> syz-executor](#syz-fuzzer--syz-executor)
+- [syz-executor](#syz-executor)
 
 ## Overview
 ![process_structures](images/syzkaller/process_structure.png)
@@ -19,44 +21,54 @@ title: "syzkaller internals: architecture"
 
 ---
 
-| 接下来简要分析各个模块之间的关系，本文的目的是暂时去掉多余的细节，把各个组件之间管理与通信的实现细节抽离出来，方便和我一样的初学者快速理解。本文假设读者已经[搭建 syzkaller 所需环境并成功运行](https://github.com/google/syzkaller/blob/master/docs/setup.md)。
+| 接下来简要分析各个模块之间的关系，本文的目的是暂时去掉多余的细节，把各个组件之间管理与通信的实现细节抽离出来，方便和我一样的初学者快速理解。本文假设读者已经[搭建 syzkaller 所需环境并成功运行](https://github.com/google/syzkaller/blob/master/docs/setup.md)。本文假设 syzkaller 目标配置为 qemu, amd64, linux。
 
-## syz-manager <-> VM
+## syz-manager <---> VM
 
-在 syz-manager 中，载入配置文件后，首先会在 RunManager() 中调用 vm.Create() 创建 vmPool，这是一个用于管理 vm 的结构体。其中 impl 指向代表了具体 vm 实现的结构体（例如 qemu，kvm 等）。Create 函数主要还是做一些配置和检查的初始化工作。
+在 syz-manager 中，用 Manager 结构体来记录与 fuzzing 相关的数据，cfg 字段代表了启动 syz-manager 所提供的配置文件的相关配置。在 main 函数中首先就会通过 mgrconfig.LoadFile() 来从配置文件中载入配置，初始化 cfg 字段。载入配置文件后，首先会在 RunManager() 中调用 vm.Create() -> typ.Ctor() 创建 vmPool，其中 impl 指向代表了具体 vm 实现的结构体（例如 qemu，kvm 等），从名字可以看出这是一个用于管理 vm 的实例，其包含一个 Pool.Create() 函数，之后用来创建 instance 实例。Pool 也有一个字段名叫 cfg，他的数据是在 typ.Ctor() 中解析配置文件的 vm 字段而来的。
 
-```
-type Pool struct {
-    impl     vmimpl.Pool
-    workdir  string
-    template string
-    timeouts targets.Timeouts
-}
+```go
 
-type Pool struct { //vmimpl.Pool
-    env        *vmimpl.Env
-    cfg        *Config
-    target     *targets.Target
-    archConfig *archConfig
-    version    string
-}
+/*
+       +----------------------------+
+       |type Manager struct {       |
+  +----+ cfg       *mgrconfig.Config|
+  |    | vmPool    *vm.Pool         |
+  |    | ...                        |
+  |    |}                           |
+  |    +----------------------------+
+  |
+  |    +----------------------------+
+  +--->+type Pool struct {          |
+       | impl     vmimpl.Pool       +----+
+       | ...                        |    |
+       |}                           |    |
+       +----------------------------+    |
+                                         |
+       +----------------------------+    |
+       |type Pool struct {          +<---+
+  +----+ env        *vmimpl.Env     |
+  |    | cfg        *Config         |
+  |    | ...                        |         +----------+
+  |    | Create()                   +-------->+ instance |
+  |    |}                           |         +----------+
+  |    +----------------------------+
+  |
+  |    +----------------------------+
+  +--->+type Env struct {           |
+       | Name          string       |
+       | OS            string       |
+       | ...                        |
+       | DebugFuzzer   bool         |
+       |}                           |
+       +----------------------------+
+*/
 
 func Create(cfg *mgrconfig.Config, debug bool) (*Pool, error) {
-    typ, ok := vmimpl.Types[cfg.Type]
-    if !ok {
-        return nil, fmt.Errorf("unknown instance type '%v'", cfg.Type)
-    }
     env := &vmimpl.Env{
         Name:     cfg.Name,
         OS:       cfg.TargetOS,
-        Arch:     cfg.TargetVMArch,
-        Workdir:  cfg.Workdir,
-        Image:    cfg.Image,
-        SSHKey:   cfg.SSHKey,
-        SSHUser:  cfg.SSHUser,
-        Timeouts: cfg.Timeouts,
-        Debug:    debug,
-        Config:   cfg.VM,
+        ...
     }
     impl, err := typ.Ctor(env)
     if err != nil {
@@ -73,85 +85,35 @@ func Create(cfg *mgrconfig.Config, debug bool) (*Pool, error) {
 func ctor(env *vmimpl.Env) (vmimpl.Pool, error) {
     archConfig := archConfigs[env.OS+"/"+env.Arch]
     cfg := &Config{
-        Count:       1,
-        CPU:         1,
-        Mem:         1024,
-        ImageDevice: "hda",
-        Qemu:        archConfig.Qemu,
-        QemuArgs:    archConfig.QemuArgs,
-        NetDev:      archConfig.NetDev,
-        Snapshot:    true,
+        ...
     }
     if err := config.LoadData(env.Config, cfg); err != nil {
         return nil, fmt.Errorf("failed to parse qemu vm config: %v", err)
     }
-    if cfg.Count < 1 || cfg.Count > 128 {
-        return nil, fmt.Errorf("invalid config param count: %v, want [1, 128]", cfg.Count)
-    }
-    if env.Debug && cfg.Count > 1 {
-        log.Logf(0, "limiting number of VMs from %v to 1 in debug mode", cfg.Count)
-        cfg.Count = 1
-    }
-    if _, err := exec.LookPath(cfg.Qemu); err != nil {
-        return nil, err
-    }
-    if env.Image == "9p" {
-        if env.OS != targets.Linux {
-            return nil, fmt.Errorf("9p image is supported for linux only")
-        }
-        if cfg.Kernel == "" {
-            return nil, fmt.Errorf("9p image requires kernel")
-        }
-    } else {
-        if !osutil.IsExist(env.Image) {
-            return nil, fmt.Errorf("image file '%v' does not exist", env.Image)
-        }
-    }
-    if cfg.CPU <= 0 || cfg.CPU > 1024 {
-        return nil, fmt.Errorf("bad qemu cpu: %v, want [1-1024]", cfg.CPU)
-    }
-    if cfg.Mem < 128 || cfg.Mem > 1048576 {
-        return nil, fmt.Errorf("bad qemu mem: %v, want [128-1048576]", cfg.Mem)
-    }
-    cfg.Kernel = osutil.Abs(cfg.Kernel)
-    cfg.Initrd = osutil.Abs(cfg.Initrd)
-
-    output, err := osutil.RunCmd(time.Minute, "", cfg.Qemu, "--version")
-    if err != nil {
-        return nil, err
-    }
-    version := string(bytes.Split(output, []byte{'\n'})[0])
-
+    ...
     pool := &Pool{
         env:        env,
         cfg:        cfg,
-        version:    version,
-        target:     targets.Get(env.OS, env.Arch),
-        archConfig: archConfig,
+        ...
     }
     return pool, nil
 }
 ```
 
-之后会进入 vmLoop() 函数，通过 for 循环来持续运行 vm 实例。其中使用 instances 数组来维护可用的 instance 数量。有三种情况会往 instances 里 append：
+之后会进入 vmLoop() 函数，通过 for 循环来持续启动 vm 实例。其中使用 instances 数组来维护可用的 instance 数量。有三种情况会往 instances 里 append：
 1. 在程序初次运行时，会通过 bootInstance channel 来控制按一定速率往 instances 里 append。
 2. 当 vm crash 过后会往 isntances 里 append。
-3. 当 repro 过程结束后。（代表当前 vm 生命周期结束；之后再补充）
+3. 当 repro 过程结束后。 （此 instance 生命周期结束，crash 相关之后再补充）
 
-当发现有可用 instance 时，就会调用 mgr.runInstance(idx) 来运行一个实例。
-```
+当发现 instances 数组长度大于 0，即有可用 instance 时，就会调用 mgr.runInstance() 来运行一个实例。
+
+```go
 func (mgr *Manager) vmLoop() {
-    log.Logf(0, "booting test machines...")
-    log.Logf(0, "wait for the connection from test machine...")
-    instancesPerRepro := 4
     vmCount := mgr.vmPool.Count()
-    if instancesPerRepro > vmCount {
-        instancesPerRepro = vmCount
-    }
     bootInstance := make(chan int)
     go func() {
         for i := 0; i < vmCount; i++ {
-            bootInstance <- i
+            bootInstance <- i           // <===[1]
             time.Sleep(10 * time.Second * mgr.cfg.Timeouts.Scale)
         }
     }()
@@ -171,281 +133,203 @@ func (mgr *Manager) vmLoop() {
         }
 
         select {
-        case idx := <-bootInstance:
+        case idx := <-bootInstance:   // <===[1]
             instances = append(instances, idx)
         case res := <-runDone:
             log.Logf(1, "loop: instance %v finished, crash=%v", res.
-            instances = append(instances, res.idx)
-            ...
+            instances = append(instances, res.idx)  // <===[2]
+            if shutdown != nil && res.crash != nil {
+				needRepro := mgr.saveCrash(res.crash)
+				if needRepro {
+					log.Logf(1, "loop: add pending repro for '%v'", res.crash.Title)
+					pendingRepro[res.crash] = true
+				}
+			}
         case res := <-reproDone:
             log.Logf(1, "loop: repro on %+v finished '%v', repro=%v crepro=%v desc='%v'",
                 res.instances, res.report0.Title, res.res != nil, crepro, title)
             delete(reproducing, res.report0.Title)
-            instances = append(instances, res.instances...)
+            instances = append(instances, res.instances...) // <===[3]
         }
     }
 }
 ```
 
-会通过 runInstance() -> runInstanceInner() -> mgr.vmPool.Craete() -> pool.impl.Create() 调用到不同类型 vm 实现的 Create() 函数，这里以 qemu 为例。qemu 主要在 Create() 中重复尝试调用 ctor() 来创建虚拟机实例，每个实例都由 instance 结构体来维护，记录了当前实例的一些参数和配置，ctor() 中简单的初始化这个结构体然后进入 inst.boot() 完成具体的启动流程。inst.boot() 则是根据 config 对 qemu 的启动参数进行构造，然后将启动命令的 stdout 和 stderr 重定向到管道，以便当 boot 失败时，获得失败的原因。最后会通过 WaitForSSH() 来检验虚拟机是否正常启动，其内部通过 ssh 来控制虚拟机执行一次 pwd 命令。
+会根据之前创建的 vmPool，通过调用链 runInstance() -> runInstanceInner() -> mgr.vmPool.Craete() -> pool.impl.Create() 调用到不同类型 vm 实现的 Create() 函数用于创建 instance 实例。qemu 主要在 Create() 中重复尝试调用 ctor() 来创建虚拟机实例，每个实例数据都由 instance 结构体来维护，记录了当前实例的一些参数和配置，可以看到配置文件中针对 vm 的配置信息会通过 cfg 进行记录，而其他的配置信息则是通过 pool.env 进行传递。
 
-```
+ctor() 中简单的初始化这个结构体，然后进入 inst.boot() 完成具体的启动流程。inst.boot() 则是根据配置信息对 qemu 的启动参数进行构造，然后将启动命令 Command 的 stdout 和 stderr 重定向到管道，以便当 boot 失败时，获得失败的原因；此外 stdout，stderr 对应管道的读端会加入到 inst.merger 中，便于之后对 qemu 运行状态的监控。最后会通过 WaitForSSH() 来检验虚拟机是否正常启动，其内部通过 ssh 来控制虚拟机执行一次 pwd 命令。
+
+```go
 type instance struct {
-    index       int
-    cfg         *Config
-    target      *targets.Target
-    archConfig  *archConfig
-    version     string
-    args        []string
-    image       string
-    debug       bool
-    os          string
-    workdir     string
-    sshkey      string
-    sshuser     string
-    timeouts    targets.Timeouts
-    port        int
-    monport     int
-    forwardPort int
-    mon         net.Conn
-    monEnc      *json.Encoder
-    monDec      *json.Decoder
-    rpipe       io.ReadCloser
-    wpipe       io.WriteCloser
-    qemu        *exec.Cmd
-    merger      *vmimpl.OutputMerger
-    files       map[string]string
-    diagnose    chan bool
+	index         int
+	cfg           *Config
+	debug         bool
+	sshkey        string
+	sshuser       string
+	rpipe         io.ReadCloser
+	wpipe         io.WriteCloser
+    ...
+    Copy()
+    Run()
+    ...
 }
+
+func (pool *Pool) Create(workdir string, index int) (vmimpl.Instance, error) {
+    ...
+	for i := 0; ; i++ {
+		inst, err := pool.ctor(workdir, sshkey, sshuser, index)
+		if err == nil {
+			return inst, nil
+		}
+        ...
+	}
+}
+
+func (pool *Pool) ctor(workdir, sshkey, sshuser string, index int) (vmimpl.Instance, error) {
+	inst := &instance{
+		index:         index,
+		cfg:           pool.cfg,
+		image:         pool.env.Image,
+		debug:         pool.env.Debug,
+        ...
+	}
+	var err error
+	inst.rpipe, inst.wpipe, err = osutil.LongPipe()
+    ...
+	if err := inst.boot(); err != nil {
+		return nil, err
+	}
+    ...
+}
+
 
 func (inst *instance) boot() error {
-    inst.port = vmimpl.UnusedTCPPort()
-    inst.monport = vmimpl.UnusedTCPPort()
-    args := []string{
-        "-m", strconv.Itoa(inst.cfg.Mem),
-        "-smp", strconv.Itoa(inst.cfg.CPU),
-        "-chardev", fmt.Sprintf("socket,id=SOCKSYZ,server=on,nowait,host=localhost,port=%v", inst.monport),
-        "-mon", "chardev=SOCKSYZ,mode=control",
-        "-display", "none",
-        "-serial", "stdio",
-        "-no-reboot",
-        "-name", fmt.Sprintf("VM-%v", inst.index),
-    }
-    if inst.archConfig.RngDev != "" {
-        args = append(args, "-device", inst.archConfig.RngDev)
-    }
-    templateDir := filepath.Join(inst.workdir, "template")
-    args = append(args, splitArgs(inst.cfg.QemuArgs, templateDir, inst.index)...)
-    args = append(args,
-        "-device", inst.cfg.NetDev+",netdev=net0",
-        "-netdev", fmt.Sprintf("user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:%v-:22", inst.port))
-    if inst.image == "9p" {
-        args = append(args,
-            "-fsdev", "local,id=fsdev0,path=/,security_model=none,readonly",
-            "-device", "virtio-9p-pci,fsdev=fsdev0,mount_tag=/dev/root",
-        )
-    } else if inst.image != "" {
-        if inst.archConfig.UseNewQemuImageOptions {
-            args = append(args,
-                "-device", "virtio-blk-device,drive=hd0",
-                "-drive", fmt.Sprintf("file=%v,if=none,format=raw,id=hd0", inst.image),
-            )
-        } else {
-            // inst.cfg.ImageDevice can contain spaces
-            imgline := strings.Split(inst.cfg.ImageDevice, " ")
-            imgline[0] = "-" + imgline[0]
-            if strings.HasSuffix(imgline[len(imgline)-1], "file=") {
-                imgline[len(imgline)-1] = imgline[len(imgline)-1] + inst.image
-            } else {
-                imgline = append(imgline, inst.image)
-            }
-            args = append(args, imgline...)
-        }
-        if inst.cfg.Snapshot {
-            args = append(args, "-snapshot")
-        }
-    }
-    if inst.cfg.Initrd != "" {
-        args = append(args,
-            "-initrd", inst.cfg.Initrd,
-        )
-    }
-    if inst.cfg.Kernel != "" {
-        cmdline := append([]string{}, inst.archConfig.CmdLine...)
-        if inst.image == "9p" {
-            cmdline = append(cmdline,
-                "root=/dev/root",
-                "rootfstype=9p",
-                "rootflags=trans=virtio,version=9p2000.L,cache=loose",
-                "init="+filepath.Join(inst.workdir, "init.sh"),
-            )
-        }
-        cmdline = append(cmdline, inst.cfg.Cmdline)
-        args = append(args,
-            "-kernel", inst.cfg.Kernel,
-            "-append", strings.Join(cmdline, " "),
-        )
-    }
-    if inst.cfg.EfiCodeDevice != "" {
-        args = append(args,
-            "-drive", "if=pflash,format=raw,readonly=on,file="+inst.cfg.EfiCodeDevice,
-        )
-    }
-    if inst.cfg.EfiVarsDevice != "" {
-        args = append(args,
-            "-drive", "if=pflash,format=raw,readonly=on,file="+inst.cfg.EfiVarsDevice,
-        )
-    }
-    if inst.cfg.AppleSmcOsk != "" {
-        args = append(args,
-            "-device", "isa-applesmc,osk="+inst.cfg.AppleSmcOsk,
-        )
-    }
-    if inst.debug {
-        log.Logf(0, "running command: %v %#v", inst.cfg.Qemu, args)
-    }
-    inst.args = args
-    qemu := osutil.Command(inst.cfg.Qemu, args...)
-    qemu.Stdout = inst.wpipe
-    qemu.Stderr = inst.wpipe
-    if err := qemu.Start(); err != nil {
-        return fmt.Errorf("failed to start %v %+v: %v", inst.cfg.Qemu, args, err)
-    }
-    inst.wpipe.Close()
-    inst.wpipe = nil
-    inst.qemu = qemu
-    // Qemu has started.
-
-    // Start output merger.
-    var tee io.Writer
-    if inst.debug {
-        tee = os.Stdout
-    }
+	args := []string{
+		"-m", strconv.Itoa(inst.cfg.Mem),
+		"-smp", strconv.Itoa(inst.cfg.CPU),
+		"-chardev", fmt.Sprintf("socket,id=SOCKSYZ,server=on,nowait,host=localhost,port=%v", inst.monport),
+        ...
+	}
+	if inst.cfg.Initrd != "" {
+		args = append(args,
+			"-initrd", inst.cfg.Initrd,
+		)
+	}
+    ...
+	inst.args = args
+	qemu := osutil.Command(inst.cfg.Qemu, args...)
+	qemu.Stdout = inst.wpipe
+	qemu.Stderr = inst.wpipe
+	if err := qemu.Start(); err != nil {
+		return fmt.Errorf("failed to start %v %+v: %v", inst.cfg.Qemu, args, err)
+	}
+	inst.qemu = qemu
     inst.merger = vmimpl.NewOutputMerger(tee)
-    inst.merger.Add("qemu", inst.rpipe)
-    inst.rpipe = nil
-
-    var bootOutput []byte
-    bootOutputStop := make(chan bool)
-    go func() {
-        for {
-            select {
-            case out := <-inst.merger.Output:
-                bootOutput = append(bootOutput, out...)
-            case <-bootOutputStop:
-                close(bootOutputStop)
-                return
-            }
-        }
-    }()
-    if err := vmimpl.WaitForSSH(inst.debug, 10*time.Minute*inst.timeouts.Scale, "localhost",
-        inst.sshkey, inst.sshuser, inst.os, inst.port, inst.merger.Err); err != nil {
-        bootOutputStop <- true
-        <-bootOutputStop
-        return vmimpl.MakeBootError(err, bootOutput)
-    }
-    bootOutputStop <- true
-    return nil
+	inst.merger.Add("qemu", inst.rpipe)
+    ...
+	if err := vmimpl.WaitForSSH(inst.debug, 10*time.Minute*inst.timeouts.Scale, "localhost",
+		inst.sshkey, inst.sshuser, inst.os, inst.port, inst.merger.Err); err != nil {
+		return vmimpl.MakeBootError(err, bootOutput)
+	}
+	bootOutputStop <- true
+	return nil
 }
 ```
 
-之后都不会通过任何方式直接监控 vm 的运行状态了，会监控 syz-fuzzer 的运行状态判断当前 vm 是否 crash。
 
-## syz-manager <-> syz-fuzzer
+之后 manager 对于 vm 的控制就通过 instance 提供的 API 来完成。vm 的输出被加入到了 inst.merger 中，对于 vm 运行状态的监控主要是通过解析 output，之后 syz-fuzzer 的输出也会加入到 inst.merger 中，状态监控是在一起的，所以这一点后面再讲。
+
+## syz-manager ---> syz-fuzzer
 
 上一节提到 runInstanceInner() 中调用 mgr.vmPool.Create() 来创建 vm 实例，在创建实例之后就会通过 inst.Copy() 把 syz-fuzzer 和 syz-executor 拷贝进虚拟机中，对于 qemu 这个过程是通过 scp 命令实现的。
 
-之后调用 instance.FUzzerCmd() 构造 syz-fuzzer 的启动参数，大多是根据 cfg 解析生成的，需要关注的主要是 fwdAddr 参数，其为 manager 启动 RPC 服务的地址。syz-fuzzer 和 syz-manager 主要通过 RPC 进行通信。
+之后调用 instance.FuzzerCmd() 构造 syz-fuzzer 的启动参数，大多是根据 cfg 解析生成的，需要关注的主要是 fwdAddr 参数，其为 manager 启动 RPC 服务的地址。syz-fuzzer 和 syz-manager 主要通过 RPC 进行通信。
 
-紧接着调用 inst.Run() 启动 syz-fuzzer，在 qemu 中使用 ssh 实现。用管道接管 cmd 的 stdout 和 stderr，传入 MonitorExecution() 对运行状态进行监控。
+紧接着调用 inst.Run() 启动 syz-fuzzer，在 qemu 中使用 ssh 实现。用管道替换 cmd 的 stdout 和 stderr，同样的也将管道的读端加入 inst.merger，方便对 syz-fuzzer 的运行状态进行监控，然后返回 inst.merger.Output（包含了 qemu 和 ssh 的输出）；此外还创建了一个 errc 管道，运行了一个线程对 ssh 命令的错误和特殊情况进行处理，如果需要中止命令则调用 signal 往 errc 管道发送数据。最后将 inst.merger.Output 和 errc 一并传入 MonitorExecution()，对 vm 和 fuzzer 运行状态进行监控。
 
 ```
 func (mgr *Manager) runInstanceInner(index int, instanceName string) (*report.Report, []byte, error) {
     inst, err := mgr.vmPool.Create(index)
-    if err != nil {
-        return nil, nil, fmt.Errorf("failed to create instance: %v", err)
-    }
     defer inst.Close()
-
+    
     fwdAddr, err := inst.Forward(mgr.serv.port)
-    if err != nil {
-        return nil, nil, fmt.Errorf("failed to setup port forwarding: %v", err)
-    }
-
     fuzzerBin, err := inst.Copy(mgr.cfg.FuzzerBin)
-    if err != nil {
-        return nil, nil, fmt.Errorf("failed to copy binary: %v", err)
-    }
 
-    // If ExecutorBin is provided, it means that syz-executor is already in the image,
-    // so no need to copy it.
     executorBin := mgr.sysTarget.ExecutorBin
     if executorBin == "" {
         executorBin, err = inst.Copy(mgr.cfg.ExecutorBin)
-        if err != nil {
-            return nil, nil, fmt.Errorf("failed to copy binary: %v", err)
-        }
     }
-
-    fuzzerV := 0
-    procs := mgr.cfg.Procs
-    if *flagDebug {
-        fuzzerV = 100
-        procs = 1
-    }
+    ...
 
     // Run the fuzzer binary.
-    start := time.Now()
-    atomic.AddUint32(&mgr.numFuzzing, 1)
-    defer atomic.AddUint32(&mgr.numFuzzing, ^uint32(0))
-
     cmd := instance.FuzzerCmd(fuzzerBin, executorBin, instanceName,
         mgr.cfg.TargetOS, mgr.cfg.TargetArch, fwdAddr, mgr.cfg.Sandbox, procs, fuzzerV,
         mgr.cfg.Cover, *flagDebug, false, false, true, mgr.cfg.Timeouts.Slowdown)
     outc, errc, err := inst.Run(mgr.cfg.Timeouts.VMRunningTime, mgr.vmStop, cmd)
-    if err != nil {
-        return nil, nil, fmt.Errorf("failed to run fuzzer: %v", err)
-    }
+    ...
 
     var vmInfo []byte
     rep := inst.MonitorExecution(outc, errc, mgr.reporter, vm.ExitTimeout)
-    if rep == nil {
-        // This is the only "OK" outcome.
-        log.Logf(0, "%s: running for %v, restarting", instanceName, time.Since(start))
-    } else {
-        vmInfo, err = inst.Info()
-        if err != nil {
-            vmInfo = []byte(fmt.Sprintf("error getting VM info: %v\n", err))
-        }
-    }
+    ...
 
     return rep, vmInfo, nil
 }
+
+func (inst *instance) Run(timeout time.Duration, stop <-chan bool, command string) (
+	<-chan []byte, <-chan error, error) {
+	rpipe, wpipe, err := osutil.LongPipe()
+	inst.merger.Add("ssh", rpipe)
+    ...
+	sshArgs := vmimpl.SSHArgsForward(inst.debug, inst.sshkey, inst.port, inst.forwardPort)
+	args := strings.Split(command, " ")
+	if bin := filepath.Base(args[0]); inst.target.HostFuzzer &&
+		(bin == "syz-fuzzer" || bin == "syz-execprog") {
+        ...
+	} else {
+		args = []string{"ssh"}
+		args = append(args, sshArgs...)
+		args = append(args, inst.sshuser+"@localhost", "cd "+inst.targetDir()+" && "+command)
+	}
+    ...
+	cmd := osutil.Command(args[0], args[1:]...)
+	cmd.Stdout = wpipe
+	cmd.Stderr = wpipe
+	if err := cmd.Start(); err != nil {
+		wpipe.Close()
+		return nil, nil, err
+	}
+    ...
+	errc := make(chan error, 1)
+    signal := func(err error) {
+		select {
+		case errc <- err:
+		default:
+		}
+	}
+	go func() {
+	retry:
+		select {
+		case <-time.After(timeout):
+			signal(vmimpl.ErrTimeout)
+		case <-stop:
+			signal(vmimpl.ErrTimeout)
+        ...
+		cmd.Process.Kill()
+		cmd.Wait()
+	}()
+	return inst.merger.Output, errc, nil
+}
 ```
 
-（之后补充）
-
+MonitorExecution() 主要是从 isnt.Run() 返回的 errc 和 inst.merger.Output 两个管道中中接受和处理数据。errc 有数据代表命令已经中止，根据 err 的类型设置不同的参数调用 extractError()，参数的含义是默认的 crash 类型，extractError() 会尝试从 output 中匹配特定类型 crash 的消息（包括 syz-fuzzer 和 vm），匹配到则返回对应的类型，没有则返回参数的默认类型。outc 也是调用 ContainsCrash 完成类似的从输出匹配 crash 的操作。此外获得 syz-fuzzer 的一些正常运行状态也是在这里。
 
 ```
 func (inst *Instance) MonitorExecution(outc <-chan []byte, errc <-chan error,
-    reporter *report.Reporter, exit ExitCondition) (rep *report.Report) {
-    mon := &monitor{
-        inst:     inst,
-        outc:     outc,
-        errc:     errc,
-        reporter: reporter,
-        exit:     exit,
-    }
-    lastExecuteTime := time.Now()
-    ticker := time.NewTicker(tickerPeriod * inst.timeouts.Scale)
-    defer ticker.Stop()
     for {
         select {
         case err := <-errc:
             switch err {
             case nil:
-                // The program has exited without errors,
-                // but wait for kernel output in case there is some delayed oops.
                 crash := ""
                 if mon.exit&ExitNormal == 0 {
                     crash = lostConnectionCrash
@@ -457,9 +341,6 @@ func (inst *Instance) MonitorExecution(outc <-chan []byte, errc <-chan error,
                 }
                 return nil
             default:
-                // Note: connection lost can race with a kernel oops message.
-                // In such case we want to return the kernel oops.
-                crash := ""
                 if mon.exit&ExitError == 0 {
                     crash = lostConnectionCrash
                 }
@@ -470,38 +351,15 @@ func (inst *Instance) MonitorExecution(outc <-chan []byte, errc <-chan error,
                 outc = nil
                 continue
             }
-            lastPos := len(mon.output)
-            mon.output = append(mon.output, out...)
             if bytes.Contains(mon.output[lastPos:], executingProgram1) ||
-                bytes.Contains(mon.output[lastPos:], executingProgram2) {
-                lastExecuteTime = time.Now()
-            }
+				bytes.Contains(mon.output[lastPos:], executingProgram2) {
+				lastExecuteTime = time.Now()
+			}
             if reporter.ContainsCrash(mon.output[mon.matchPos:]) {
                 return mon.extractError("unknown error")
             }
-            if len(mon.output) > 2*beforeContext {
-                copy(mon.output, mon.output[len(mon.output)-beforeContext:])
-                mon.output = mon.output[:beforeContext]
-            }
-            // Find the starting position for crash matching on the next iteration.
-            // We step back from the end of output by maxErrorLength to handle the case
-            // when a crash line is currently split/incomplete. And then we try to find
-            // the preceding '\n' to have a full line. This is required to handle
-            // the case when a particular pattern is ignored as crash, but a suffix
-            // of the pattern is detected as crash (e.g. "ODEBUG:" is trimmed to "BUG:").
-            mon.matchPos = len(mon.output) - maxErrorLength
-            for i := 0; i < maxErrorLength; i++ {
-                if mon.matchPos <= 0 || mon.output[mon.matchPos-1] == '\n' {
-                    break
-                }
-                mon.matchPos--
-            }
-            if mon.matchPos < 0 {
-                mon.matchPos = 0
-            }
+            ...
         case <-ticker.C:
-            // Detect both "no output whatsoever" and "kernel episodically prints
-            // something to console, but fuzzer is not actually executing programs".
             if time.Since(lastExecuteTime) > inst.timeouts.NoOutput {
                 return mon.extractError(noOutputCrash)
             }
@@ -512,7 +370,12 @@ func (inst *Instance) MonitorExecution(outc <-chan []byte, errc <-chan error,
 } 
 ```
 
-用于和 syz-fuzzer 通信的 RPC 服务在 runManager() 中调用 startRPCServer() 初始化，依靠 golang 自带的 rpc 模块实现。目前主要有以下功能（之后补充说明）：
+一旦 syz-fuzzer 运行结束或者 vm 崩溃等原因导致 MonitorExecution() 返回，其返回的 report 就会一路通过 runInstanceInner() -> runInstance() 返回到 vmLoop() 中，最终被调用 mgr.saveCrash() 保存。
+
+
+## syz-manager <--- syz-fuzzer
+
+syz-fuzzer 用于和 syz-manager 通信的 RPC 服务在 runManager() 中调用 startRPCServer() 初始化，依靠 golang 自带的 rpc 模块实现。主要有以下功能（之后补充说明）：
 * Connect
 * rotateCorpus
 * selectInputs
@@ -521,127 +384,180 @@ func (inst *Instance) MonitorExecution(outc <-chan []byte, errc <-chan error,
 * Poll
 * shutdownInstance
 
-## syz-fuzzer <-> syz-executor
+## syz-fuzzer <---> syz-executor
 
-syz-fuzzer 的 main 函数中有一个 for 循环，负责生成 flagProcs 个 fuzzer processes。其调用 proc.loop() 进入每个 process 的 fuzz 主循环。Proc 是用来管理 fuzzer processes 的结构体。
+| 不同编译时的宏定义，会导致 syz-executor 有很大差别的行为，这里仅讨论默认配置的情况。
+
+整体结构上来讲，syz-fuzzer 主要通过 Fuzzer 结构体来管理当前虚拟机上的 fuzz 进程，整体类似生产者消费者，字段 Fuzzer.procs 指向了 process 数组，一个 process 代表了一个 worker，会不停从 Fuzzer.workQueue 尝试获取 work。注意 Proc 字段 env 指向了一个实例 command，这个其实相当于 syz-fuzzer 和 syz-executor 建立的 session，控制 syz-executor 执行 syscall，以及数据交换都是基于这个实例。（事实上限于对 syzkaller 的认识有限，我并不总能理解这些结构体层级的设计理念，不过很多时候只关心部分实现就够了不是吗）
 
 ```
-type Proc struct {
-    fuzzer            *Fuzzer
-    pid               int
-    env               *ipc.Env
-    rnd               *rand.Rand
-    execOpts          *ipc.ExecOpts
-    execOptsCover     *ipc.ExecOpts
-    execOptsComps     *ipc.ExecOpts
-    execOptsNoCollide *ipc.ExecOpts
-}
 
+                                            +-----------------------------+         +---------------------+
+                                            | type Proc struct {          |    +--->+ type Env struct {   |     +-----------------------+
+  +--------------------------------+   +--->+  fuzzer            *Fuzzer  |    |    |  cmd       *command +---->+ type command struct { |
+  | type Fuzzer struct {           |   |    |  pid               int      |    |    |  pid       int      |     |  pid      int         |
+  |  config            *ipc.Config |   |    |  env               *ipc.Env +----+    |  config    *Config  |     |  config   *Config     |
+  |  procs             []*Proc     +<--+    |  ...                        |         |  ...                |     |  cmd      *exec.Cmd   |
+  |  workQueue         *WorkQueue  |   |    | }                           |         | }                   |     |  inrp     *os.File    |
+  |  corpus       []*prog.Prog     |   |    +-----------------------------+         +---------------------+     |  outwp    *os.File    |
+  |  ...                           |   |                                                                        |  outmem   []byte      |
+  | }                              |   |                                                                        |  ...                  |
+  +--------------------------------+   |    +-----------------------------+                                     |  handshake()          |
+                                       |    | type Proc struct {          |                                     |  exec()               |
+                                       +--->+  fuzzer            *Fuzzer  |                                     | }                     |
+                                            |  pid               int      |                                     +-----------------------+
+                                            |  env               *ipc.Env |
+                                            |  ...                        |
+                                            | }                           |
+                                            +-----------------------------+
+
+```
+
+main() 首先会做很多初始化工作，例如解析参数，创建 RpcClient，同步 syz-manager 等。然后会进入一个 for 循环，负责生成指定个数的 fuzzer processes。首先调用 newProc() 来生成 proc 实例，然后通过调用 proc.loop() 进入每个 proc 的 fuzz 主循环。
+
+```go
 func main() {
+	var (
+		flagName    = flag.String("name", "test", "unique name for manager")
+		flagOS      = flag.String("os", runtime.GOOS, "target OS")
+		...
+	)
+	...
+	if err := manager.Call("Manager.Connect", a, r); err != nil {
+		log.Fatalf("failed to connect to manager: %v ", err)
+	}
+	...
+	fuzzer := &Fuzzer{
+		config:                   config,
+		workQueue:                newWorkQueue(*flagProcs, needPoll),
+		...
+	}
+	...
+	log.Logf(0, "starting %v fuzzer processes", *flagProcs)
+	for pid := 0; pid < *flagProcs; pid++ {
+		proc, err := newProc(fuzzer, pid)
+		if err != nil {
+			log.Fatalf("failed to create proc: %v", err)
+		}
+		fuzzer.procs = append(fuzzer.procs, proc)
+		go proc.loop()
+	}
+
+	fuzzer.pollLoop()
+}
+
+func newProc(fuzzer *Fuzzer, pid int) (*Proc, error) {
+	env, err := ipc.MakeEnv(fuzzer.config, pid)
     ...
-    log.Logf(0, "starting %v fuzzer processes", *flagProcs)
-    for pid := 0; pid < *flagProcs; pid++ {
-        proc, err := newProc(fuzzer, pid)
-        if err != nil {
-            log.Fatalf("failed to create proc: %v", err)
-        }
-        fuzzer.procs = append(fuzzer.procs, proc)
-        go proc.loop()
-    }
+	proc := &Proc{
+		fuzzer:            fuzzer,
+		pid:               pid,
+        ...
+	}
+	return proc, nil
+}
+
+func MakeEnv(config *Config, pid int) (*Env, error) {
+	var inf, outf *os.File
+	var inmem, outmem []byte
+	if config.UseShmem {
+		inf, inmem, err = osutil.CreateMemMappedFile(prog.ExecBufferSize)
+		outf, outmem, err = osutil.CreateMemMappedFile(outputSize)
+        ...
+	}
+	env := &Env{
+		in:      inmem,
+		out:     outmem,
+        ...
+	}
     ...
+	return env, nil
 }
 ```
 
-proc.loop() 则是一个 while 循环不断执行 fuzz 的各个阶段，具体的过程在之后的文章中补充，这里主要关注 syz-fuzzer 和 syz-executor 的管理和通信方式的实现。proc.loop() 会调用 proc.execute() 来启动 syz-executor 执行具体的样本。
+概括地说 proc.loop() 就是一个 while 循环不断从 workQueue 中获取 work 然后执行对应的 fuzz 阶段，如果没有获取到，则会选择生成种子，或者从当前 corpus 中突变。细节流程暂不关心，本文主要关注 syz-fuzzer 和 syz-executor 的管理和通信方式的实现。proc.loop() 中需要执行样本的话就会调用 proc.execute() 来启动 syz-executor 执行具体的样本。
 
-通过 proc.execute() -> proc.executeRaw() 来尝试启动 syz-executor。在 executeRaw() 内部也会 try 很多次，通过 proc.env.Exec() 来尝试启动 syz-executor。
+```go
+func (proc *Proc) loop() {
+	for i := 0; ; i++ {
+		item := proc.fuzzer.workQueue.dequeue()
+		if item != nil {
+			switch item := item.(type) {
+			case *WorkTriage:
+				proc.triageInput(item)
+			case *WorkCandidate:
+				proc.execute(proc.execOpts, item.p, item.flags, StatCandidate)
+            ...
+			}
+			continue
+		}
 
-在 proc.env.Exec() 中首先调用 makeCommand() 创建 env.cmd，command 结构体可以看作是 syz-fuzzer 和 syz-executor 的 session（如果没有启用 FORK_SERVER 则这个 session 会在每次执行完后清除，反之则会一直存在）。之后通过这个 session 调用 env.cmd.exec() 控制 syz-executor 执行具体的系统调用，最后 parseOutput() 对结果进行解析。
-
+		ct := proc.fuzzer.choiceTable
+		fuzzerSnapshot := proc.fuzzer.snapshot()
+		if len(fuzzerSnapshot.corpus) == 0 || i%generatePeriod == 0 {
+			// Generate a new prog.
+			p := proc.fuzzer.target.Generate(proc.rnd, prog.RecommendedCalls, ct)
+			proc.execute(proc.execOpts, p, ProgNormal, StatGenerate)
+		} else {
+			// Mutate an existing prog.
+			p := fuzzerSnapshot.chooseProgram(proc.rnd).Clone()
+			p.Mutate(proc.rnd, prog.RecommendedCalls, ct, fuzzerSnapshot.corpus)
+			proc.execute(proc.execOpts, p, ProgNormal, StatFuzz)
+		}
+	}
+}
 ```
-type command struct {
-    pid      int
-    config   *Config
-    timeout  time.Duration
-    cmd      *exec.Cmd
-    dir      string
-    readDone chan []byte
-    exited   chan struct{}
-    inrp     *os.File
-    outwp    *os.File
-    outmem   []byte
+
+经过 proc.execute() -> proc.executeRaw() -> proc.env.Exec() 来尝试启动 syz-executor。在 proc.env.Exec() 中，首先会调用 p.SerializeForExec() 将程序序列化为 executor 可以解析的形式到 env.in 中，env.in 是在 MakeEnv 时创建的 SHM。如果 cmd 为空，则首先调用 makeCommand() 创建 env.cmd，command 结构体可以看作是 syz-fuzzer 和 syz-executor 的 session（如果没有启用 FORK_SERVER 则这个 session 会在每次执行完后清除，反之则会一直存在，只需要在 process 第一次执行时创建）。之后通过这个 session 调用 env.cmd.exec() 控制 syz-executor 执行具体的系统调用，最后 parseOutput() 对结果进行解析。
+
+```go
+func (proc *Proc) execute(execOpts *ipc.ExecOpts, p *prog.Prog, flags ProgTypes, stat Stat) *ipc.ProgInfo {
+	info := proc.executeRaw(execOpts, p, stat)
+    ...
+}
+
+func (proc *Proc) executeRaw(opts *ipc.ExecOpts, p *prog.Prog, stat Stat) *ipc.ProgInfo {
+	for try := 0; ; try++ {
+		output, info, hanged, err := proc.env.Exec(opts, p)
+		if err != nil {
+			if try > 10 {
+				log.Fatalf("executor %v failed %v times:\n%v", proc.pid, try, err)
+			}
+            ...
+		}
+		log.Logf(2, "result hanged=%v: %s", hanged, output)
+		return info
+	}
 }
 
 func (env *Env) Exec(opts *ExecOpts, p *prog.Prog) (output []byte, info *ProgInfo, hanged bool, err0 error) {
     // Copy-in serialized program.
-    progSize, err := p.SerializeForExec(env.in)
-    if err != nil {
-        err0 = err
-        return
-    }
+    rogSize, err := p.SerializeForExec(env.in)
     var progData []byte
-    if !env.config.UseShmem {
-        progData = env.in[:progSize]
-    }
-    // Zero out the first two words (ncmd and nsig), so that we don't have garbage there
-    // if executor crashes before writing non-garbage there.
-    for i := 0; i < 4; i++ {
-        env.out[i] = 0
-    }
-
-    atomic.AddUint64(&env.StatExecs, 1)
+	if !env.config.UseShmem {
+		progData = env.in[:progSize]
+	}
+    ...
     if env.cmd == nil {
-        if p.Target.OS != targets.TestOS && targets.Get(p.Target.OS, p.Target.Arch).HostFuzzer {
-            // The executor is actually ssh,
-            // starting them too frequently leads to timeouts.
-            <-rateLimit.C
-        }
-        tmpDirPath := "./"
-        atomic.AddUint64(&env.StatRestarts, 1)
+        ...
         env.cmd, err0 = makeCommand(env.pid, env.bin, env.config, env.inFile, env.outFile, env.out, tmpDirPath)
-        if err0 != nil {
-            return
-        }
     }
     output, hanged, err0 = env.cmd.exec(opts, progData)
-    if err0 != nil {
-        env.cmd.close()
-        env.cmd = nil
-        return
-    }
 
     info, err0 = env.parseOutput(p)
-    if info != nil && env.config.Flags&FlagSignal == 0 {
-        addFallbackSignal(p, info)
-    }
+
     if !env.config.UseForkServer {
         env.cmd.close()
         env.cmd = nil
     }
     return
 }
-
 ```
 
-makeCommand() 主要也是通过 osutil.Command() 来启动 syz-executor（这里的 Command() 的是指在 shell 中执行的命令，注意与作为 session 的 command 结构体作区分）。这里创建了三个管道对 Command 的 stdin，stdout 和 stderr 进行了替换。替换 stdin，stdout 的管道主要是用来交换命令和数据；替换 stderr 的主要是用来做错误处理。除此之外，如果设置了 SYZ_EXECUTOR_USES_SHMEM 则会创建两个文件作为 shm，并通过 cmd.ExtraFiles 传递文件描述符。
+makeCommand() 主要也是通过 osutil.Command() 来启动 syz-executor（这里的 Command() 的是指在 shell 中执行的命令，注意与作为 session 的 command 结构体作区分）。这里创建了三个管道对 Command 的 stdin，stdout 和 stderr 进行了替换。替换 stdin，stdout 的管道主要是用来交换命令；替换 stderr 的主要是用来输出一些错误信息（后续好像不通过解析 stderr 信息的方式来判断是否发生错误，是通过直接看读写操作是否能成功完成判断进程是否异常退出）。此外，如果设置了 SYZ_EXECUTOR_USES_SHMEM 则会创建两个文件作为 shm，并通过 cmd.ExtraFiles 传递文件描述符，用来交换 syscall 的执行所需参数和执行结果。因为默认开了 fork_server 所以在 syz-executor 启动后会首先调用 handshake() 建立连接，可以看到 handshake() 内部是通过 stdin 和 stdout 来交换的数据。
 
-```
+```go
 func makeCommand(pid int, bin []string, config *Config, inFile, outFile *os.File, outmem []byte,
-    tmpDirPath string) (*command, error) {
-    dir, err := ioutil.TempDir(tmpDirPath, "syzkaller-testdir")
-    if err != nil {
-        return nil, fmt.Errorf("failed to create temp dir: %v", err)
-    }
-    dir = osutil.Abs(dir)
-
-    timeout := config.Timeouts.Program
-    if config.UseForkServer {
-        // Executor has an internal timeout and protects against most hangs when fork server is enabled,
-        // so we use quite large timeout. Executor can be slow due to global locks in namespaces
-        // and other things, so let's better wait than report false misleading crashes.
-        timeout *= 10
-    }
-
     c := &command{
         pid:     pid,
         config:  config,
@@ -649,49 +565,22 @@ func makeCommand(pid int, bin []string, config *Config, inFile, outFile *os.File
         dir:     dir,
         outmem:  outmem,
     }
-    defer func() {
-        if c != nil {
-            c.close()
-        }
-    }()
-
-    if err := os.Chmod(dir, 0777); err != nil {
-        return nil, fmt.Errorf("failed to chmod temp dir: %v", err)
-    }
 
     // Output capture pipe.
     rp, wp, err := os.Pipe()
-    if err != nil {
-        return nil, fmt.Errorf("failed to create pipe: %v", err)
-    }
-    defer wp.Close()
-
     // executor->ipc command pipe.
     inrp, inwp, err := os.Pipe()
-    if err != nil {
-        return nil, fmt.Errorf("failed to create pipe: %v", err)
-    }
-    defer inwp.Close()
     c.inrp = inrp
-
     // ipc->executor command pipe.
     outrp, outwp, err := os.Pipe()
-    if err != nil {
-        return nil, fmt.Errorf("failed to create pipe: %v", err)
-    }
-    defer outrp.Close()
     c.outwp = outwp
 
-    c.readDone = make(chan []byte, 1)
-    c.exited = make(chan struct{})
-
+    ...
     cmd := osutil.Command(bin[0], bin[1:]...)
     if inFile != nil && outFile != nil {
         cmd.ExtraFiles = []*os.File{inFile, outFile}
     }
     cmd.Dir = dir
-    // Tell ASAN to not mess with our NONFAILING.
-    cmd.Env = append(append([]string{}, os.Environ()...), "ASAN_OPTIONS=handle_segv=0 allow_user_segv_handler=1")
     cmd.Stdin = outrp
     cmd.Stdout = inwp
     if config.Flags&FlagDebug != 0 {
@@ -699,38 +588,12 @@ func makeCommand(pid int, bin []string, config *Config, inFile, outFile *os.File
         cmd.Stderr = os.Stdout
     } else {
         cmd.Stderr = wp
-        go func(c *command) {
-            // Read out output in case executor constantly prints something.
-            const bufSize = 128 << 10
-            output := make([]byte, bufSize)
-            var size uint64
-            for {
-                n, err := rp.Read(output[size:])
-                if n > 0 {
-                    size += uint64(n)
-                    if size >= bufSize*3/4 {
-                        copy(output, output[size-bufSize/2:size])
-                        size = bufSize / 2
-                    }
-                }
-                if err != nil {
-                    rp.Close()
-                    c.readDone <- output[:size]
-                    close(c.readDone)
-                    return
-                }
-            }
-        }(c)
+        ...
     }
     if err := cmd.Start(); err != nil {
         return nil, fmt.Errorf("failed to start executor binary: %v", err)
     }
     c.cmd = cmd
-    wp.Close()
-    // Note: we explicitly close inwp before calling handshake even though we defer it above.
-    // If we don't do it and executor exits before writing handshake reply,
-    // reading from inrp will hang since we hold another end of the pipe open.
-    inwp.Close()
 
     if c.config.UseForkServer {
         if err := c.handshake(); err != nil {
@@ -738,7 +601,260 @@ func makeCommand(pid int, bin []string, config *Config, inFile, outFile *os.File
         }
     }
     tmp := c
-    c = nil // disable defer above
     return tmp, nil
+}
+
+func (c *command) handshake() error {
+	req := &handshakeReq{
+		magic: inMagic,
+		flags: uint64(c.config.Flags),
+		pid:   uint64(c.pid),
+	}
+	reqData := (*[unsafe.Sizeof(*req)]byte)(unsafe.Pointer(req))[:]
+	if _, err := c.outwp.Write(reqData); err != nil {
+		return c.handshakeError(fmt.Errorf("failed to write control pipe: %v", err))
+	}
+
+	read := make(chan error, 1)
+	go func() {
+		reply := &handshakeReply{}
+		replyData := (*[unsafe.Sizeof(*reply)]byte)(unsafe.Pointer(reply))[:]
+		if _, err := io.ReadFull(c.inrp, replyData); err != nil {
+			read <- err
+			return
+		}
+		if reply.magic != outMagic {
+			read <- fmt.Errorf("bad handshake reply magic 0x%x", reply.magic)
+			return
+		}
+		read <- nil
+	}()
+	// Sandbox setup can take significant time.
+	timeout := time.NewTimer(time.Minute * c.config.Timeouts.Scale)
+	select {
+	case err := <-read:
+		timeout.Stop()
+		if err != nil {
+			return c.handshakeError(err)
+		}
+		return nil
+	case <-timeout.C:
+		return c.handshakeError(fmt.Errorf("not serving"))
+	}
+```
+
+cmd.exec() 负责控制一次样本的执行，首先通过 excutor 的 stdin 发送执行 syscall 的命令给 syz-executor，由于默认启用了 SHM 来传输 ProgData 这里的 progData 会为 nil（已经在 SerializeForExec() 中写入 SHM，Sesyz-executor 会直接从 mmap 的 SHM 中读取 ProgData）。然后期望收集 syz-executor 返回的 executeReply 和 callReply，由于开启了 SHM，这里正常只会返回 executeReply，callReply 通过 SHM(out) 进行传递。
+
+```go
+func (c *command) exec(opts *ExecOpts, progData []byte) (output []byte, hanged bool, err0 error) {
+	req := &executeReq{
+		magic:            inMagic,
+		progSize:         uint64(len(progData)),
+        ...
+	}
+	reqData := (*[unsafe.Sizeof(*req)]byte)(unsafe.Pointer(req))[:]
+	if _, err := c.outwp.Write(reqData); err != nil {
+		output = <-c.readDone
+		err0 = fmt.Errorf("executor %v: failed to write control pipe: %v", c.pid, err)
+		return
+	}
+	if progData != nil {
+		if _, err := c.outwp.Write(progData); err != nil {
+			output = <-c.readDone
+			err0 = fmt.Errorf("executor %v: failed to write control pipe: %v", c.pid, err)
+			return
+		}
+	}
+	// At this point program is executing.
+	for {
+		reply := &executeReply{}
+		replyData := (*[unsafe.Sizeof(*reply)]byte)(unsafe.Pointer(reply))[:]
+		if _, err := io.ReadFull(c.inrp, replyData); err != nil {
+			break
+		}
+		if reply.magic != outMagic {
+			fmt.Fprintf(os.Stderr, "executor %v: got bad reply magic 0x%x\n", c.pid, reply.magic)
+			os.Exit(1)
+		}
+		if reply.done != 0 {
+			exitStatus = int(reply.status)
+			break
+		}
+		callReply := &callReply{}
+		callReplyData := (*[unsafe.Sizeof(*callReply)]byte)(unsafe.Pointer(callReply))[:]
+		if _, err := io.ReadFull(c.inrp, callReplyData); err != nil {
+			break
+		}
+		if callReply.signalSize != 0 || callReply.coverSize != 0 || callReply.compsSize != 0 {
+			// This is unsupported yet.
+			fmt.Fprintf(os.Stderr, "executor %v: got call reply with coverage\n", c.pid)
+			os.Exit(1)
+		}
+		copy(outmem, callReplyData)
+		outmem = outmem[len(callReplyData):]
+		*completedCalls++
+	}
+    ...
+	return
+}
+```
+
+## syz-executor
+
+main() 函数开始是一系列配置，然后会根据提供的 shm_fd 来映射两块内存负责读入执行 syscall 所需参数和写回 call_reply。接着等待 syz-fuzzer 发出的 handshake 请求，之后就调用 do_sandbox_none() 来执行后续的操作。
+
+```c++
+int main(int argc, char** argv)
+{
+    ...
+#if SYZ_EXECUTOR_USES_SHMEM
+	if (mmap(&input_data[0], kMaxInput, PROT_READ, MAP_PRIVATE | MAP_FIXED, kInFd, 0) != &input_data[0])
+		fail("mmap of input file failed");
+	void* preferred = (void*)(0x1b2bc20000ull + (1 << 20) * (getpid() % 128));
+	output_data = (uint32*)mmap(preferred, kMaxOutput,
+				    PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, kOutFd, 0);
+	if (output_data != preferred)
+		fail("mmap of output file failed");
+    
+    ...
+#if SYZ_EXECUTOR_USES_FORK_SERVER
+	receive_handshake();
+    ...
+	int status = 0;
+	if (flag_sandbox_none)
+		status = do_sandbox_none();
+    ...
+	doexit(status);
+	// Unreachable.
+	return 1;
+}
+```
+
+do_sandbox_none() 内有一个不明所以的 fork()（写了原因但没仔细看），然后就进入 loop() 函数。对于没有启用 FORK_SERVER 的 executor 来说，loop() 内部就单纯执行了一次 execute_one()。启用了 FORK_SERVER 的 loop() 就是循环地调用 receive_execute() 从 syz-fuzzer 接受 execute_req，然后 fork 一个子进程来完成通过 execute_one() 来完成一次样本的执行。执行完毕后调用 reply_execute() 来回传 execute_reply 数据。
+
+```c++
+static int do_sandbox_none(void)
+{
+	// CLONE_NEWPID takes effect for the first child of the current process,
+	// so we do it before fork to make the loop "init" process of the namespace.
+	// We ought to do fail here, but sandbox=none is used in pkg/ipc tests
+	// and they are usually run under non-root.
+	// Also since debug is stripped by pkg/csource, we need to do {}
+	// even though we generally don't do {} around single statements.
+	if (unshare(CLONE_NEWPID)) {
+		debug("unshare(CLONE_NEWPID): %d\n", errno);
+	}
+	int pid = fork();
+	if (pid != 0)
+		return wait_for_loop(pid);
+    ...
+	loop();
+	doexit(1);
+}
+
+
+#if SYZ_EXECUTOR_USES_FORK_SERVER
+void loop(void)
+{
+	reply_handshake();
+	int iter = 0;
+	for (;; iter++) {
+		receive_execute();
+		int pid = fork();
+		if (pid < 0)
+			fail("clone failed");
+		if (pid == 0) {
+			execute_one();
+			doexit(0);
+		}
+		debug("spawned worker pid %d\n", pid);
+		int status = 0;
+		uint64 start = current_time_ms();
+		for (;;) {
+			if (waitpid(-1, &status, WNOHANG | WAIT_FLAGS) == pid)
+				break;
+            ...
+		}
+        reply_execute(0)
+        ...
+	}
+}
+#else
+void loop(void)
+{
+	execute_one();
+}
+#endif
+```
+
+因为一个样本 program 可能由多个 syscall 组成序列，所以用 for 循环来接受执行所有的系统调用（严格来说这里并不是一次迭代执行一个 syscall，读入一个参数就会执行一次迭代，通过 call_num 来判断是否需要执行 syscall）。
+
+读取完一个 syscall 所需参数，做一些必要的检查过后就通过 schedule_call() 来创建一个线程，线程内部通过调用 execute_call() 完成 syscall 的执行（如果没有设置 flag_threaded，则会在当前线程调用 execute_call()。handle_completion() 将执行结果 syscall_reply 回传给 syz-fuzzer()，内部有点复杂，这里不再展开。
+
+```c++
+void execute_one()
+{
+	for (;;) {
+		uint64 call_num = read_input(&input_pos);
+		if (call_num == instr_eof)
+			break;
+		if (call_num == instr_copyin) {
+			char* addr = (char*)read_input(&input_pos);
+			uint64 typ = read_input(&input_pos);
+			switch (typ) {
+			case arg_const: {
+			}
+			case arg_result: {
+			}
+            ...
+			}
+			default:
+				failmsg("bad argument type", "type=%llu", typ);
+			continue;
+		}
+        ...
+		// Normal syscall.
+		thread_t* th = schedule_call(call_index++, call_num, colliding, copyout_index,
+					     num_args, args, input_pos);
+
+		if (colliding && (call_index % 2) == 0) {
+		} else if (flag_threaded) {
+			if (flag_debug && timeout_ms < 1000)
+				timeout_ms = 1000;
+			if (event_timedwait(&th->done, timeout_ms))
+				handle_completion(th);
+			}
+		} else {
+			// Execute directly.
+			if (th != &threads[0])
+				fail("using non-main thread in non-thread mode");
+			event_reset(&th->ready);
+			execute_call(th);
+			event_set(&th->done);
+			handle_completion(th);
+		}
+	}
+    ...
+}
+```
+
+execute_call() 内部调用 execute_syscall() 调用 syscall 真正执行系统调用，并将结果作对应记录。至此大致完成从 syz-manager 出发到 syscall 执行的过程。
+
+```c++
+void execute_call(thread_t* th)
+{
+    ...
+	NONFAILING(th->res = execute_syscall(call, th->args));
+	th->reserrno = errno;
+	if ((th->res == -1 && th->reserrno == 0) || call->attrs.ignore_return)
+		th->reserrno = EINVAL;
+    ...
+}
+
+intptr_t execute_syscall(const call_t* c, intptr_t a[kMaxArgs])
+{
+	if (c->call)
+		return c->call(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8]);
+	return syscall(c->sys_nr, a[0], a[1], a[2], a[3], a[4], a[5]);
 }
 ```
