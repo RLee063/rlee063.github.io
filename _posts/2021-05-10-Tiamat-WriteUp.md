@@ -9,14 +9,17 @@ title: "[dc29q] tiamat writeup"
 
 
 ## TOC
-- [qemu-user 简介](#1-qemu-user-简介)
-- [题目初分析](#2-题目初分析)
-- [人类代码可读计划](#3-人类代码阅读计划)
-- [程序逻辑分析](#4-程序逻辑分析)
-- [找到 BUG](#5-找到-bug)
-- [还原 License](#6-还原-license)
-- [错误的道路](#7-错误的道路)
-- [最后的 Flag](#8-最后的-flag)
+- [TOC](#toc)
+- [1 qemu-user 简介](#1-qemu-user-简介)
+- [2 题目初分析](#2-题目初分析)
+- [3 人类代码阅读计划](#3-人类代码阅读计划)
+- [4 程序逻辑分析](#4-程序逻辑分析)
+- [5 找到 BUG](#5-找到-bug)
+  - [BUG1: r0 misuse](#bug1-r0-misuse)
+  - [BUG2: syscall number misuse](#bug2-syscall-number-misuse)
+- [6 还原 License](#6-还原-license)
+- [7 错误的道路](#7-错误的道路)
+- [8 最后的 Flag](#8-最后的-flag)
 - [参考](#参考)
 
 ## 1 qemu-user 简介
