@@ -13,11 +13,18 @@
 {%- if posts.size > 0 -%}
   <ul>
     {%- for post in posts limit: include.limit -%}
-        {%- if post.category -%}
+        {%- if (include.lookup == post.type) -%}
             <li>
               <span>{{- post.date | date: site.theme_config.date_format -}}</span>
               <a href="{{ post.url | relative_url }}">{{ post.title }}</a>
             </li>
+        {%- else -%}
+          {%- if post.type == none and include.lookup == 'post' -%}
+            <li>
+              <span>{{- post.date | date: site.theme_config.date_format -}}</span>
+              <a href="{{ post.url | relative_url }}">{{ post.title }}</a>
+            </li>
+          {%- endif -%}
         {%- endif -%}
     {%- endfor -%}
     {%- if include.show_more and limit_exceeded -%}

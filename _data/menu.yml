@@ -12,6 +12,12 @@ entries:
       show_more: true
       show_more_text: See archive...
       show_more_url: archive.html 
+  - title: disclosures
+    bulletin_list:
+      limit: 10
+      show_more: true
+      show_more_text: See archive...
+      show_more_url: archive.html 
   - title: notes
     entries:
       - title: writeups
