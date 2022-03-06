@@ -28,12 +28,15 @@ entries:
             url: https://www.notion.so/k1r0akuee/f92093eb9c1c4528a8c6cdd5af76e9c9?v=7652cebc8e0a49afa1fca0a684af565f
           - title: CVE repro
             url: https://www.notion.so/k1r0akuee/67f2baca8b4a455683615a721b29fb11?v=ded96a266c154bb4b84b35a0926df2ef
+      - title: fuzzing
+        entries:
+          - title: paper reading notes
+            url: https://www.notion.so/k1r0akuee/b89ee25b755a458ba8c5dc810824a264?v=835b6b21380949e2a5858b15869fcf37
       - title: libc exploitation
         url: https://www.notion.so/k1r0akuee/libc-all-in-one-5ff0b30463ec4bc0a0fb40541a691d96
       - title: linux kernel exploitation
         url: https://www.notion.so/k1r0akuee/kernel-all-in-one-f22ec5fa6ae84e8697614b9e19d9b82f
       - title: vm escape (todo)
-      - title: fuzzing (todo)
   - title: contacts
     entries:
       - title: github
