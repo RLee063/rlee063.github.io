@@ -88,11 +88,12 @@ div.highlighter-rouge code {
 }
 
 blockquote {
-  font-style: italic;
-  // border: thin solid rgb(255, 255, 255);
-  padding: 1rem;
-
-  p { margin: 0; }
+  // font-style: italic;
+  border-left: medium solid rgb(255, 255, 255);
+  // padding: 1rem;
+  padding-left: 1rem;
+  margin-left: 0;
+  // p { margin: 0; }
 }
 
 img {
