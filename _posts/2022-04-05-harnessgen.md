@@ -2,6 +2,7 @@
 layout: post
 category: source_read
 title: "Winapp fuzzing: Winnie/harnessgen"
+tag: post
 ---
 
 > emo 了好长一段时间，因为焦虑无法集中注意力，做什么事也都提不起来兴趣。比赛好长时间没打了，没有学到什么东西，博客也断更了几个月。希望能通过再写写博客的方式，提升一点学习的专注度。;(

@@ -2,6 +2,7 @@
 layout: post
 category: write_up
 title: "[dc29q] tiamat writeup"
+tag: post
 ---
 
 [题目传送门](https://archive.ooo/c/tiamat/401/)

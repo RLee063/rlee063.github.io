@@ -2,13 +2,15 @@
 layout: post
 category: source_read
 title: "syzkaller internals: architecture"
+tag: post
 ---
 ## TOC
+- [TOC](#toc)
 - [Overview](#overview)
-- [syz-manager <---> VM](#syz-manager--vm)
-- [syz-manager ---> syz-fuzzer](#syz-manager--syz-fuzzer)
-- [syz-manager <--- syz-fuzzer](#syz-manager--syz-fuzzer-1)
-- [syz-fuzzer <---> syz-executor](#syz-fuzzer--syz-executor)
+- [syz-manager <---> VM](#syz-manager-----vm)
+- [syz-manager ---> syz-fuzzer](#syz-manager-----syz-fuzzer)
+- [syz-manager <--- syz-fuzzer](#syz-manager-----syz-fuzzer-1)
+- [syz-fuzzer <---> syz-executor](#syz-fuzzer-----syz-executor)
 - [syz-executor](#syz-executor)
 
 ## Overview

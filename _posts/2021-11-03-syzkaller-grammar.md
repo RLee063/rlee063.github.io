@@ -2,6 +2,7 @@
 layout: post
 category: source_read
 title: "syzkaller internals: grammar system"
+tag: post
 ---
 
 作为 API fuzzer，syzkaller 有一套自己的 [syscall descriptions](https://github.com/google/syzkaller/blob/master/docs/syscall_descriptions.md)，你也可以在这里查看其[语法](https://github.com/google/syzkaller/blob/master/docs/syscall_descriptions_syntax.md)。

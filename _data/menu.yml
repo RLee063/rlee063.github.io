@@ -8,17 +8,17 @@ entries:
 
   - title: posts
     post_list:
-      limit: 10
+      limit: 8
       show_more: true
       show_more_text: See archive...
       show_more_url: archive.html 
   - title: disclosures
     bulletin_list:
-      limit: 10
+      limit: 8
       show_more: true
       show_more_text: See archive...
       show_more_url: archive.html 
-  - title: notes
+  - title: archives
     entries:
       - title: writeups
         entries:

@@ -11,7 +11,7 @@
     {%-if item.post_list-%}
       {%
         include post_list.html
-          lookup='post'
+          tag='post'
           category=item.post_list.category
           limit=item.post_list.limit
           show_more=item.post_list.show_more
@@ -23,12 +23,12 @@
     {%-if item.bulletin_list-%}
       {%
         include post_list.html
-          lookup='bulletin'
-          category=item.post_list.category
-          limit=item.post_list.limit
-          show_more=item.post_list.show_more
-          show_more_text=item.post_list.show_more_text
-          show_more_url=item.post_list.show_more_url
+          tag='bulletin'
+          category=item.bulletin_list.category
+          limit=item.bulletin_list.limit
+          show_more=item.bulletin_list.show_more
+          show_more_text=item.bulletin_list.show_more_text
+          show_more_url=item.bulletin_list.show_more_url
      -%}
     {%-endif-%}
 

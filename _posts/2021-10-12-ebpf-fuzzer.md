@@ -2,6 +2,7 @@
 layout: post
 category: source_read
 title: ebpf-fuzzer 源码分析
+tag: post
 ---
 前几天看到有人 release 了一个 [ebpf-fuzzer](https://github.com/snorez/ebpf-fuzzer)，正好自己在学习这方面的东西，就看了一下这个东西的源码，稍微做一点记录。
 
