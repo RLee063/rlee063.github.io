@@ -8,6 +8,18 @@
     {%- endif -%}
     </li>
 
+    {%-if item.note_list-%}
+    {%
+      include post_list.html
+        tag='note'
+        category=item.post_list.category
+        limit=item.post_list.limit
+        show_more=item.post_list.show_more
+        show_more_text=item.post_list.show_more_text
+        show_more_url=item.post_list.show_more_url
+    -%}
+    {%-endif-%}
+
     {%-if item.post_list-%}
       {%
         include post_list.html

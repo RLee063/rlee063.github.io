@@ -6,6 +6,12 @@ entries:
     entries:
       - title: "k1r0aKuee: a tired dog @UESCT, wanna be a researcher."
 
+  - title: notes
+    note_list:
+      limit: 5
+      show_more: true
+      show_more_test: See archive...
+      show_more_url: archive.html
   - title: posts
     post_list:
       limit: 8
