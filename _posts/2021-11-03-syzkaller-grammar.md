@@ -22,7 +22,7 @@ tag: post
 
 系统调用的描述基本就是把模板从 C 翻译为 syscall description syntax，因为返回值作为 fd 会被其他系统调用使用，所以需要为其创建一个 resource。
 
-```
+```cpp
 int bpf(int cmd[BPF_PROG_LOAD], union bpf_attr *attr, unsigned int size);
 ---
 resource fd_bpf_prog[fd]
@@ -31,7 +31,7 @@ bpf$PROG_LOAD(cmd const[BPF_PROG_LOAD], arg ptr[in, bpf_prog], size len[arg]) fd
 
 原系统调用中 attr 作为 union 类型，描述文件中为了方便直接为其创建了一个对应的结构体类型。（不过这里为啥要用 Type Templates ？）
 
-```
+```cpp
 type bpf_prog_t[TYPE, ATTACH_TYPE, BTF_ID, PROG_FD] {
     type            TYPE
     ninsn            bytesize8[insns, int32]
@@ -98,14 +98,14 @@ bpf_framed_program {
 
 使用 syz-extract 的一般方式如下
 
-```
+```bash
 make bin/syz-extract
 bin/syz-extract -os $OS -arch $ARCH -sourcedir $KSRC -builddir $LINUXBLD <new>.txt
 ```
 
 进入 main 函数后首先会调用 flag.Parse() 解析参数，根据指定的 subsystem 和 arch 找到对应的配置，定位到包含所有该架构下系统调用描述文件的目录。做了一些准备和检查的工作后，会启用多个线程分别对指定的所有架构进行处理。
 
-```
+```go
 func main(){
     ...
     jobC := make(chan interface{}, len(archArray)*len(files))
@@ -126,7 +126,7 @@ func main(){
 
 这里采用了生产者消费者的工作模式，除了 main() 函数中会往 jobC 里加入 arch 作为 job 之外，在每个 arch 处理结束后会把 file 加入 jobC 中。
 
-```
+```go
 func worker(extractor Extractor, jobC chan interface{}) {
     for job := range jobC {
         switch j := job.(type) {
@@ -153,7 +153,7 @@ processArch() 的过程主要包含三个步骤：
 2. ExtractConsts() 提取出所有的常量。
 3. prepareArch()
 
-```
+```go
 func processArch(extractor Extractor, arch *Arch) (map[string]*compiler.ConstInfo, error) {
 	errBuf := new(bytes.Buffer)
 	eh := func(pos ast.Pos, msg string) {
@@ -176,7 +176,7 @@ func processArch(extractor Extractor, arch *Arch) (map[string]*compiler.ConstInf
 
 ParseGlob() 基本上是按原样把描述文件 .txt 中的规则解析为了一种 in-memory 的表示 Node 到一个数组中存储。主要流程会通过 ParseGlob()->Parse()->p.parseTopRecover()->p.parseTop() 处理。这一步主要是确定规则语句所对应语法的内置类型，parseTop() 根据扫描到的不同类型的 token，按照对应的方式解析生成对应类型的实例 Node。这一步还没有展开 syscall 中的参数，没有递归生成 AST。例如 bpf$PROG_LOAD 的第二个参数 arg ptr[in, bpf_prog]，解析结果只说明了是一个名为 arg，类型为有两个参数 [in, bpf_prog] 的 ptr 类型。
 
-```
+```go
 func (p *parser) parseTop() Node {
 	switch p.tok {
 	case tokNewLine:
@@ -218,7 +218,7 @@ func (p *parser) parseTop() Node {
 
 comp.extractConsts() 里用一个 for 循环遍历 parseGlobs() 解析出的 Node 数组，分别从 Define、Call、Struct、Int 等 Node 类型中提取出引用的常数名称。此外 syscall name 也会作为常数被放到 consts 数组中；且对于每个描述文件中 Include 和 Incdir 类型的 Node ，其指示了定义该描述文件涉及常量的文件和目录，所以其对应的路径也会被分别记录下来，帮助后面获得常量的具体数值；Define 宏定义类型的 Node 也会被记录。
 
-```
+```go
 func (comp *compiler) extractConsts() map[string]*ConstInfo {
 	infos := make(map[string]*constInfo)
 	for _, decl := range comp.desc.Nodes {
@@ -279,7 +279,7 @@ processFile() 内部通过 extractor.processFile() 调用到具体操作系统�
 
 processFile() 首先根据上一步提取的 Incdirs 构建编译选项，然后进入到 extract() -> compile() 执行。compile() 中首先调用 srcTemplate.Execute() ，根据提供的常量标识符、Define 宏定义和 include 文件，通过模板生成确定常量的 C 语言代码，再使用 gcc 编译生成二进制文件，最后返回到 extract() 执行二进制文件获得所有常量标识符对应的数值。
 
-```
+```go
 func (*linux) processFile(arch *Arch, info *compiler.ConstInfo) (map[string]uint64, map[string]bool, error) {
 	if strings.HasSuffix(info.File, "_kvm.txt") &&
 		(arch.target.Arch == targets.ARM || arch.target.Arch == targets.RiscV64) {
@@ -381,7 +381,7 @@ func compile(cc string, args []string, data *CompileData) (string, []byte, error
 
 srcTemplate.Execute() 模板样例如下（考虑未定义 ExtractFromELF），根据上一步解析的 Includes 数组引入对应的头文件，再根据 Defines 数组写上所有的宏定义。在 main() 函数中，把所有需要确定数值的变量标识符写入 vals 数组，再用一个 for 循环输出所有数值，在编译期间 gcc 会从头文件中查找出所有的常量的数值并进行替换，运行编译所得到的程序即可得到所有常量对应的数值。
 
-```
+```cpp
 #ifndef __GLIBC_USE
 #	define __GLIBC_USE(X) 0
 #endif
@@ -436,7 +436,7 @@ ExtractConsts() 以第二个参数为 nil 调用 Compile() （这里注意一下
 
 worker() 运行结束后返回到 main() 函数，将结果写入 .txt.const 文件，样例如下，主要也就是常量和 syscall 系统调用号。
 
-```
+```cpp
 # Code generated by syz-sysgen. DO NOT EDIT.
 arches = 386, amd64, arm, arm64, mips64le, ppc64le, riscv64, s390x
 BPF_ABS0 = 1

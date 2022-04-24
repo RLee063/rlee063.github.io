@@ -249,7 +249,7 @@ func (inst *instance) boot() error {
 
 紧接着调用 inst.Run() 启动 syz-fuzzer，在 qemu 中使用 ssh 实现。用管道替换 cmd 的 stdout 和 stderr，同样的也将管道的读端加入 inst.merger，方便对 syz-fuzzer 的运行状态进行监控，然后返回 inst.merger.Output（包含了 qemu 和 ssh 的输出）；此外还创建了一个 errc 管道，运行了一个线程对 ssh 命令的错误和特殊情况进行处理，如果需要中止命令则调用 signal 往 errc 管道发送数据。最后将 inst.merger.Output 和 errc 一并传入 MonitorExecution()，对 vm 和 fuzzer 运行状态进行监控。
 
-```
+```go
 func (mgr *Manager) runInstanceInner(index int, instanceName string) (*report.Report, []byte, error) {
     inst, err := mgr.vmPool.Create(index)
     defer inst.Close()
@@ -325,7 +325,7 @@ func (inst *instance) Run(timeout time.Duration, stop <-chan bool, command strin
 
 MonitorExecution() 主要是从 isnt.Run() 返回的 errc 和 inst.merger.Output 两个管道中中接受和处理数据。errc 有数据代表命令已经中止，根据 err 的类型设置不同的参数调用 extractError()，参数的含义是默认的 crash 类型，extractError() 会尝试从 output 中匹配特定类型 crash 的消息（包括 syz-fuzzer 和 vm），匹配到则返回对应的类型，没有则返回参数的默认类型。outc 也是调用 ContainsCrash 完成类似的从输出匹配 crash 的操作。此外获得 syz-fuzzer 的一些正常运行状态也是在这里。
 
-```
+```go
 func (inst *Instance) MonitorExecution(outc <-chan []byte, errc <-chan error,
     for {
         select {

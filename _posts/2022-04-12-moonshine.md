@@ -7,15 +7,15 @@ tag: post
 
 - [Introduction](#introduction)
 - [Methodology](#methodology)
-  - [Distillation Algorithm](#distillation-algorithm)
-  - [Explicit Dependencies](#explicit-dependencies)
-  - [Implicit Dependencies](#implicit-dependencies)
+	- [Distillation Algorithm](#distillation-algorithm)
+	- [Explicit Dependencies](#explicit-dependencies)
+	- [Implicit Dependencies](#implicit-dependencies)
 - [Implementation](#implementation)
-  - [strace (strace_kcov.patch)](#strace-strace_kcovpatch)
-  - [implicit-dependencies](#implicit-dependencies-1)
-  - [scanner](#scanner)
-  - [parser](#parser)
-  - [distill](#distill)
+	- [strace (strace_kcov.patch)](#strace-strace_kcovpatch)
+	- [implicit-dependencies](#implicit-dependencies-1)
+	- [scanner](#scanner)
+	- [parser](#parser)
+	- [distill](#distill)
 - [Discussion](#discussion)
 
 ## Introduction
